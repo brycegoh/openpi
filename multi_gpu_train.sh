@@ -14,7 +14,7 @@ fi
 uv run torchrun --standalone --nnodes=1 --nproc_per_node=4 scripts/train_pytorch.py pi05_tcr_full_finetune_pytorch \
 --exp_name pi05_B001_B005 \
 --checkpoint-base-dir /workspace/checkpoints \
---data.repo-id /workspace/dataset2 \
+--data.repo-id /workspace/dataset \
 --pytorch_weight_path /workspace/pi05_base_pytorch \
 --wandb-enabled \
 --batch-size 256

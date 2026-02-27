@@ -13,7 +13,7 @@ while True:
 while True:
     try:
         snapshot_download(
-            repo_id="griffinlabs/pi05_pytorch_evaluated_base", local_dir="/workspace/checkpoint/pi05_base_pytorch", repo_type="model"
+            repo_id="griffinlabs/pi05_pytorch_evaluated_base", local_dir="/workspace/base_checkpoints/pi05_base_pytorch", repo_type="model"
         )
         break
     except Exception as e:

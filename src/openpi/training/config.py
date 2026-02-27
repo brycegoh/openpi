@@ -1451,7 +1451,7 @@ _CONFIGS = [
                 prompt_from_task=True,
             ),
         ),
-        pytorch_weight_path="/workspace/checkpoints/pi05_base_pytorch",
+        pytorch_weight_path="/workspace/base_checkpoints/pi05_base_pytorch",
         # weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
