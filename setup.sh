@@ -16,7 +16,7 @@ pip install uv
 GIT_LFS_SKIP_SMUDGE=1 uv sync
 GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
 apt update
-apt install -y ffmpeg libavcodec-dev libavformat-dev libavutil-dev
+apt install -y ffmpeg libavcodec-dev libavformat-dev libavutil-dev tmux
 pip install -U "huggingface_hub[cli,hf_transfer]"
 python download_dataset_and_base_model.py
 uv pip show transformers
