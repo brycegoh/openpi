@@ -6,6 +6,11 @@ if [ "$#" -lt 1 ]; then
   exit 1
 fi
 
+if [ -z "${HF_TOKEN:-}" ]; then
+  echo "Error: HF_TOKEN is not set in the environment."
+  exit 1
+fi
+
 export DATASET_REPO_ID="$1"
 export HF_HUB_ENABLE_HF_TRANSFER="1"
 export HF_HOME="/workspace/hf-cache"

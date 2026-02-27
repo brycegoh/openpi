@@ -12,9 +12,9 @@ if [ -z "${WANDB_API_KEY:-}" ]; then
 fi
 
 uv run torchrun --standalone --nnodes=1 --nproc_per_node=4 scripts/train_pytorch.py pi05_tcr_full_finetune_pytorch \
---exp_name pi05_B001_B005 \
+--exp_name pi05_B006_B016 \
 --checkpoint-base-dir /workspace/checkpoints \
 --data.repo-id /workspace/dataset \
---pytorch_weight_path /workspace/pi05_base_pytorch \
+--pytorch_weight_path /workspace/base_checkpoints/pi05_base_pytorch \
 --wandb-enabled \
 --batch-size 256
