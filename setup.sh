@@ -1,8 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-if [ "$#" -lt 1 ]; then
-  echo "Usage: bash setup.sh <dataset/repo-name>"
+if [ "$#" -lt 2 ]; then
+  echo "Usage: bash setup.sh <dataset/repo-name> <base-model/repo-name> [base-model-repo-path]"
   exit 1
 fi
 
@@ -12,6 +12,8 @@ if [ -z "${HF_TOKEN:-}" ]; then
 fi
 
 export DATASET_REPO_ID="$1"
+export BASE_MODEL_REPO_ID="$2"
+export BASE_MODEL_REPO_PATH="${3:-}"
 export HF_HUB_ENABLE_HF_TRANSFER="1"
 export HF_HOME="/workspace/hf-cache"
 export OPENPI_DATA_HOME="/workspace/openpi-cache"
