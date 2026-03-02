@@ -10,7 +10,7 @@ template_id: "8u8g3zo2jg"
 gpu_type: "NVIDIA A100-SXM4-80GB"
 gpu_count: 4
 cloud_type: "SECURE"
-container_disk_gb: 100
+container_disk_gb: 50
 volume_gb: 500
 volume_mount_path: "/workspace"
 

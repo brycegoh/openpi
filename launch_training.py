@@ -51,8 +51,10 @@ def notify_telegram(message: str):
         return
 
 
-def build_startup_cmd(cfg: dict, env_var_names: list[str]) -> str:
-    """Build the bash one-liner that runs inside the pod on startup."""
+def build_workflow_cmd(
+    cfg: dict, env_var_names: list[str], stop_after_training: bool = False,
+) -> str:
+    """Build the &&-chained shell command for the full setup + training workflow."""
     git_repo = cfg["git_repo"]
     git_branch = cfg["git_branch"]
     dataset_repo = cfg["dataset_repo"]
@@ -95,6 +97,12 @@ def build_startup_cmd(cfg: dict, env_var_names: list[str]) -> str:
         f" || {{ {tg_curl} --data-urlencode 'text=Training {exp_name} FAILED'; exit 1; }}"
     )
 
+    if stop_after_training:
+        train_with_notify += (
+            " ; curl -s -X POST https://rest.runpod.io/v1/pods/$RUNPOD_POD_ID/stop "
+            '-H "Authorization: Bearer $RUNPOD_API_KEY" || true'
+        )
+
     export_cmds = [f"export {name}=${name}" for name in env_var_names]
 
     inner_cmds = " && ".join(export_cmds + [
@@ -106,27 +114,63 @@ def build_startup_cmd(cfg: dict, env_var_names: list[str]) -> str:
         train_with_notify,
     ])
 
-    env_prefix = " ".join(f'{name}="${name}"' for name in env_var_names)
+    return inner_cmds
 
-    return (
-        f'{env_prefix} tmux new-session -d -s training '
-        f"'{inner_cmds}' && tmux wait-for training"
-    )
+
+def build_startup_cmd(
+    cfg: dict, env_var_names: list[str], stop_after_training: bool = False,
+) -> str:
+    """Build the dockerStartCmd that writes /post_start.sh and execs /start.sh.
+
+    The generated command writes a /post_start.sh script that installs tmux and
+    runs the full workflow (clone, setup, training) inside a detached tmux
+    session named 'train'.  The template's /start.sh entrypoint is preserved,
+    providing SSH, Jupyter, nginx, and env export.
+
+    SSH in and run ``tmux attach -t train`` to monitor progress.
+    """
+    workflow = build_workflow_cmd(cfg, env_var_names, stop_after_training)
+
+    # /post_start.sh is called by /start.sh after nginx, SSH, Jupyter and
+    # env-export are already set up.  We install tmux, write the workflow
+    # to a helper script (avoiding nested quoting issues), and launch it
+    # in a detached tmux session.  ``exit 0`` ensures /start.sh is never
+    # killed by set -e even if something above fails.
+    post_start_body = "\n".join([
+        "#!/bin/bash",
+        "apt-get update && apt-get install -y tmux",
+        "cat > /tmp/train_workflow.sh << 'TRAIN_WORKFLOW_EOF'",
+        "#!/bin/bash",
+        workflow,
+        "TRAIN_WORKFLOW_EOF",
+        "chmod +x /tmp/train_workflow.sh",
+        "tmux new-session -d -s train 'bash /tmp/train_workflow.sh'",
+        "exit 0",
+    ])
+
+    startup = "\n".join([
+        "cat > /post_start.sh << 'POSTSTART'",
+        post_start_body,
+        "POSTSTART",
+        "chmod +x /post_start.sh",
+        "exec /start.sh",
+    ])
+
+    return startup
 
 
 def build_pod_payload(
     cfg: dict, hf_token: str, wandb_api_key: str,
     telegram_token: str, telegram_chat_id: str,
 ) -> dict:
-    startup_cmd = build_startup_cmd(
-        cfg, ["HF_TOKEN", "WANDB_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"]
-    )
+    env_var_names = ["HF_TOKEN", "WANDB_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"]
+    stop_after = cfg.get("stop_after_training", False)
+    if stop_after:
+        env_var_names.append("RUNPOD_API_KEY")
 
-    if cfg.get("stop_after_training", False):
-        startup_cmd += (
-            " ; curl -s -X POST https://rest.runpod.io/v1/pods/$RUNPOD_POD_ID/stop "
-            '-H "Authorization: Bearer $RUNPOD_API_KEY" || true'
-        )
+    startup_cmd = build_startup_cmd(
+        cfg, env_var_names, stop_after_training=stop_after,
+    )
 
     payload = {
         "name": cfg["pod_name"],
