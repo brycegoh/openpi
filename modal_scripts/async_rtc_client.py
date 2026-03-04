@@ -191,6 +191,10 @@ class RTCAsyncInferenceClient:
         self._actions_skipped = 0
         self._empty_count = 0
 
+        # Snapshot of _actions_returned when the current inference started,
+        # used to compute *actual* actions consumed (not an estimate).
+        self._actions_returned_at_infer_start: int = 0
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -319,6 +323,7 @@ class RTCAsyncInferenceClient:
 
             with self._inference_lock:
                 self._inference_pending = True
+            self._actions_returned_at_infer_start = self._actions_returned
 
             try:
                 t0 = time.monotonic()
@@ -329,7 +334,11 @@ class RTCAsyncInferenceClient:
                 self._latencies.append(latency)
                 self._chunks_received += 1
 
-                self._ingest_chunk(result, latency)
+                actual_consumed = (
+                    self._actions_returned
+                    - self._actions_returned_at_infer_start
+                )
+                self._ingest_chunk(result, latency, actual_consumed)
 
                 logger.info(
                     "[RTCAsync] Chunk #%d  latency=%.0fms  buffer=%d",
@@ -370,7 +379,9 @@ class RTCAsyncInferenceClient:
         resp.raise_for_status()
         return unpackb(resp.content)
 
-    def _ingest_chunk(self, result: dict, latency: float) -> None:
+    def _ingest_chunk(
+        self, result: dict, latency: float, actual_consumed: int
+    ) -> None:
         actions = result.get("actions")
         if actions is None:
             logger.warning("[RTCAsync] Server result missing 'actions' key")
@@ -381,17 +392,29 @@ class RTCAsyncInferenceClient:
 
         chunk_size = actions.shape[0]
 
-        # The first ``actions_elapsed`` steps in the chunk correspond to the
-        # time the robot was busy while the server was computing.  They are
-        # "stale" because the robot has already moved past that point.
-        actions_elapsed = int(latency * self._control_freq)
-        start = min(actions_elapsed, chunk_size - 1)
+        # ``actual_consumed`` is the number of actions the main thread
+        # actually popped from the buffer while inference was in flight.
+        # This is the correct skip count: if the buffer was empty (robot
+        # idle) during inference, actual_consumed is 0 and we keep the
+        # whole chunk.  The old approach of ``int(latency * freq)`` over-
+        # estimated when the robot had nothing to execute.
+        start = min(actual_consumed, chunk_size - 1)
 
         end = chunk_size
         if self._action_horizon is not None:
             end = min(start + self._action_horizon, chunk_size)
 
         self._actions_skipped += start
+
+        logger.debug(
+            "[RTCAsync] Chunk ingest: chunk_size=%d  actual_consumed=%d  "
+            "est_consumed=%d  start=%d  usable=%d",
+            chunk_size,
+            actual_consumed,
+            int(latency * self._control_freq),
+            start,
+            end - start,
+        )
 
         with self._buffer_lock:
             for i in range(start, end):
