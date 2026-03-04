@@ -70,6 +70,7 @@ def build_workflow_cmd(
     num_train_steps = cfg["num_train_steps"]
     action_horizon = cfg["action_horizon"]
     use_delta = cfg.get("use_delta_joint_actions", False)
+    use_delta_flag = "--data.use-delta-joint-actions" if use_delta else "--data.no-use-delta-joint-actions"
     wandb_flag = "--wandb-enabled" if cfg.get("wandb_enabled", True) else ""
 
     weight_path = base_checkpoint
@@ -89,7 +90,7 @@ def build_workflow_cmd(
         f"--keep-period {keep_period} "
         f"--num-train-steps {num_train_steps} "
         f"--model.action-horizon {action_horizon} "
-        f"--data.use-delta-joint-actions {str(use_delta).lower()}"
+        f"{use_delta_flag}"
     )
 
     tg_curl = (
