@@ -1,25 +1,39 @@
 """Asynchronous RTC inference client for overlapping inference with action execution.
 
-This module provides ``RTCAsyncInferenceClient``, a client that runs inference
-in a background thread while the main thread executes actions at the robot's
-control frequency.  It handles both cases:
+This module provides ``RTCAsyncInferenceClient``, a client that runs model
+inference in a background thread while the main thread executes actions at
+the robot's control frequency.
 
-* **Inference faster than execution** -- action chunks queue up so there is
-  never a gap.
-* **Inference slower than execution** -- the client sends the next observation
-  to the server *before* the current chunk runs out, minimising the window
-  where the robot has no fresh actions.
+Design philosophy
+-----------------
+**Fresh observations always beat smooth but stale actions.**
 
-When ``interpolate_actions=True`` and the chunk cannot fill the inference
-window at the requested ``control_freq``, the client resamples the action
-waypoints along an **ease-out** curve so that:
+The client uses a fixed, low trigger threshold (default 1 remaining action)
+to decide when to request new inference.  This means the observation sent to
+the server is captured as late as possible -- right when the current action
+chunk is nearly exhausted -- giving the model the most up-to-date view of
+the world.  If inference takes longer than the remaining actions, the robot
+idles until the result arrives.  That idle gap is preferable to executing
+actions that were planned from an observation that is ``latency`` seconds
+old.
 
-1. The robot covers most of the planned trajectory early, then
-2. decelerates smoothly toward the end of the window.
+When ``interpolate_actions=True`` the client also resamples the action
+waypoints with an ease-out curve so the robot **decelerates** toward the end
+of each chunk.  By the time the observation is captured the robot is nearly
+stationary, giving the camera a sharp, motion-blur-free frame.
 
-The deceleration means the robot is nearly stationary right when the next
-observation is captured, reducing motion blur and giving the model a sharper
-image to plan from.
+Inference trigger strategy
+--------------------------
+``_maybe_trigger()`` fires when ``actions_remaining <= trigger_threshold``
+(default 1).  Only one inference can be in flight at a time.
+
+* **Inference faster than execution** -- the trigger fires near the end of
+  each chunk.  The result usually arrives before the buffer fully drains
+  (zero or near-zero idle gap).
+* **Inference slower than execution** -- the trigger fires at the same late
+  point.  The buffer drains and the robot idles for roughly
+  ``latency - chunk_duration`` seconds, then resumes with actions derived
+  from a fresh observation.
 
 Usage (see also ``examples/async_rtc_example.py``)::
 
@@ -27,8 +41,8 @@ Usage (see also ``examples/async_rtc_example.py``)::
         server_url="https://…modal.run",
         model_config={...},
         control_freq=30.0,
-        interpolate_actions=True,   # enable interpolation + dampening
-        damping_power=2.0,          # quadratic ease-out
+        interpolate_actions=True,
+        damping_power=2.0,
     )
 
     obs = robot.get_observation()
@@ -168,14 +182,16 @@ class RTCAsyncInferenceClient:
         step(obs)                             (blocked, waiting for trigger)
           ├─ store latest obs
           ├─ if buffer low → trigger  ───────→  read latest obs
-          ├─ check for completed result       │  POST /infer to server
-          │    → add actions to buffer        │  receive action chunk
-          └─ return buffer.popleft()          │  (interpolate if needed)
+          │    (fixed threshold)              │  POST /infer to server
+          ├─ pop action from buffer           │  receive action chunk
+          └─ return action (or None)          │  (interpolate if needed)
                                               └─ add to buffer, signal done
 
     The background thread keeps at most *one* inference in flight.  It is
-    triggered when the action buffer drops below a threshold computed from
-    the running average of measured inference latency.
+    triggered when the action buffer drops to ``trigger_threshold`` (default
+    1).  This late trigger ensures that the observation sent to the server
+    is as fresh as possible.  An idle gap after the buffer drains is
+    preferred over executing actions derived from a stale observation.
     """
 
     def __init__(
@@ -184,7 +200,7 @@ class RTCAsyncInferenceClient:
         model_config: dict[str, str],
         control_freq: float = 10.0,
         action_horizon: int | None = None,
-        latency_buffer_multiplier: float = 1.5,
+        trigger_threshold: int = 1,
         max_buffer_size: int = 300,
         http_timeout: float = 120.0,
         default_latency: float = 1.0,
@@ -200,24 +216,26 @@ class RTCAsyncInferenceClient:
                 ``folder_path``, ``config_name``, and optionally
                 ``dataset_repo_id``, ``stats_json_path``.
             control_freq: Robot control frequency in Hz.
-            action_horizon: Max actions to keep from each chunk (after latency
-                skip).  ``None`` means use all remaining actions.
-            latency_buffer_multiplier: Safety factor applied to the latency
-                estimate when deciding the trigger threshold.
+            action_horizon: Max actions to keep from each chunk (after stale-
+                action skip).  ``None`` means use all remaining actions.
+            trigger_threshold: Request new inference when the buffer has this
+                many actions (or fewer) remaining.  A low value (default 1)
+                captures the freshest possible observation.  Set higher only
+                if you need to overlap inference with execution and can
+                tolerate older observations.
             max_buffer_size: Hard cap on action buffer length.
             http_timeout: Timeout in seconds for HTTP requests.
-            default_latency: Assumed latency (seconds) before any measurement.
+            default_latency: Assumed latency (seconds) before any measurement
+                is available.  Used by the interpolation logic to size the
+                first resampled chunk.
             infer_fn: Optional override for the inference call.  Signature:
                 ``(obs_with_config: dict) -> result_dict``.  Useful for
                 testing or local mock servers.
             interpolate_actions: When ``True`` and inference is slower than
                 chunk execution, resample the action waypoints with ease-out
-                dampening to fill the full inference window at
-                ``control_freq``.  The robot decelerates toward the end so
-                the camera captures a sharp frame for the next observation.
-                When ``False`` (default) actions are delivered at
-                ``control_freq`` and ``step()`` returns ``None`` when the
-                buffer is empty.
+                dampening so the robot decelerates toward the end of each
+                chunk.  The nearly-stationary tail gives the camera a sharp
+                frame right before the next observation is captured.
             damping_power: Exponent for the ease-out curve used when
                 ``interpolate_actions`` is ``True``.  ``1.0`` = linear
                 (no dampening), ``2.0`` = quadratic, ``3.0`` = cubic.
@@ -227,7 +245,7 @@ class RTCAsyncInferenceClient:
         self._model_config = dict(model_config)
         self._control_freq = control_freq
         self._action_horizon = action_horizon
-        self._latency_buf_mult = latency_buffer_multiplier
+        self._trigger_threshold = trigger_threshold
         self._http_timeout = http_timeout
         self._default_latency = default_latency
         self._infer_fn = infer_fn
@@ -250,7 +268,7 @@ class RTCAsyncInferenceClient:
         self._trigger_event = threading.Event()
         self._first_done = threading.Event()
 
-        # Latency tracking
+        # Latency tracking (used by interpolation sizing, not by trigger)
         self._latencies: collections.deque[float] = collections.deque(maxlen=20)
         self._last_latency: float = 0.0
 
@@ -366,30 +384,17 @@ class RTCAsyncInferenceClient:
     # ------------------------------------------------------------------
 
     def _maybe_trigger(self) -> None:
+        """Request inference when the buffer is nearly exhausted.
+
+        Uses a fixed threshold so the observation is always captured as late
+        as possible (freshest state).  Any resulting idle gap is preferred
+        over actions derived from a stale observation.
+        """
         with self._inference_lock:
             if self._inference_pending:
                 return
 
-        remaining = self.actions_remaining()
-
-        if self._interpolate:
-            # Trigger LATE: capture the observation while the robot is in the
-            # dampened tail of the trajectory (nearly stationary → sharp
-            # camera frame).  This means the next chunk is based on a fresh
-            # observation instead of one that is ``latency`` seconds stale.
-            # The trade-off is an idle gap roughly equal to the inference
-            # latency, which is acceptable -- stale actions are worse than
-            # no actions.
-            threshold = 1
-        else:
-            # Without interpolation there is no dampening guarantee, so
-            # trigger early enough that the next chunk can (ideally) arrive
-            # before the buffer drains.
-            threshold = int(
-                self._avg_latency() * self._control_freq * self._latency_buf_mult
-            ) + 1
-
-        if remaining <= threshold:
+        if self.actions_remaining() <= self._trigger_threshold:
             self._trigger_event.set()
 
     def _avg_latency(self) -> float:
@@ -488,7 +493,7 @@ class RTCAsyncInferenceClient:
         chunk_size = actions.shape[0]
 
         # ``actual_consumed`` counts buffer pops during inference.  When the
-        # previous chunk was interpolated (N waypoints → M steps with ease-
+        # previous chunk was interpolated (N waypoints -> M steps with ease-
         # out), those M consumed steps do NOT correspond to M original
         # actions of trajectory progress -- the dampening curve means the
         # robot covered fewer equivalent waypoints.  We invert the ease-out
@@ -499,7 +504,7 @@ class RTCAsyncInferenceClient:
             s = 1.0 - (1.0 - t) ** power
             effective_consumed = int(s * orig_n)
             logger.debug(
-                "[RTCAsync] Inverse map: %d interpolated consumed → "
+                "[RTCAsync] Inverse map: %d interpolated consumed -> "
                 "%d equivalent original (N=%d M=%d p=%.1f)",
                 actual_consumed, effective_consumed, orig_n, target_m, power,
             )
@@ -536,7 +541,7 @@ class RTCAsyncInferenceClient:
                 )
 
                 logger.debug(
-                    "[RTCAsync] Interpolated: %d waypoints → %d actions  "
+                    "[RTCAsync] Interpolated: %d waypoints -> %d actions  "
                     "(power=%.1f, est_lat=%.0fms)",
                     usable,
                     target_count,

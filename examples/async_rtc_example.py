@@ -136,6 +136,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--control-freq", type=float, default=10.0, help="Control frequency (Hz).")
     p.add_argument("--action-horizon", type=int, default=None, help="Actions to use per chunk.")
     p.add_argument("--duration", type=float, default=30.0, help="Run duration in seconds.")
+    p.add_argument(
+        "--trigger-threshold", type=int, default=1,
+        help="Request new inference when this many actions remain in the buffer. "
+             "Low values (default 1) capture the freshest observation.",
+    )
 
     p.add_argument(
         "--interpolate", action="store_true",
@@ -199,6 +204,7 @@ def main() -> None:
         model_config=model_config,
         control_freq=args.control_freq,
         action_horizon=args.action_horizon,
+        trigger_threshold=args.trigger_threshold,
         infer_fn=infer_fn,
         interpolate_actions=args.interpolate,
         damping_power=args.damping_power,
