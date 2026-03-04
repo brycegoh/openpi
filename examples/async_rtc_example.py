@@ -137,9 +137,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--action-horizon", type=int, default=None, help="Actions to use per chunk.")
     p.add_argument("--duration", type=float, default=30.0, help="Run duration in seconds.")
     p.add_argument(
-        "--trigger-threshold", type=int, default=1,
-        help="Request new inference when this many actions remain in the buffer. "
-             "Low values (default 1) capture the freshest observation.",
+        "--trigger-threshold", type=float, default=0.25,
+        help="Fraction of the action chunk at which to request new inference. "
+             "Default 0.25 = trigger at 25%% remaining (75%% executed). "
+             "Lower = fresher observation but larger idle gap.",
     )
 
     p.add_argument(

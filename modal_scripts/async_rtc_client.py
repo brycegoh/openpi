@@ -8,14 +8,13 @@ Design philosophy
 -----------------
 **Fresh observations always beat smooth but stale actions.**
 
-The client uses a fixed, low trigger threshold (default 1 remaining action)
-to decide when to request new inference.  This means the observation sent to
-the server is captured as late as possible -- right when the current action
-chunk is nearly exhausted -- giving the model the most up-to-date view of
-the world.  If inference takes longer than the remaining actions, the robot
-idles until the result arrives.  That idle gap is preferable to executing
-actions that were planned from an observation that is ``latency`` seconds
-old.
+The client triggers new inference when the action buffer drops to 25 % of
+the last chunk size (configurable via ``trigger_threshold``).  By that point
+the robot has executed 75 % of the planned trajectory, so the observation
+is relatively fresh.  The remaining 25 % tail gives inference a small head
+start during the network round-trip.  If inference takes longer than that
+tail the robot idles until the result arrives -- that idle gap is preferable
+to executing actions planned from a stale observation.
 
 When ``interpolate_actions=True`` the client also resamples the action
 waypoints with an ease-out curve so the robot **decelerates** toward the end
@@ -24,8 +23,8 @@ stationary, giving the camera a sharp, motion-blur-free frame.
 
 Inference trigger strategy
 --------------------------
-``_maybe_trigger()`` fires when ``actions_remaining <= trigger_threshold``
-(default 1).  Only one inference can be in flight at a time.
+``_maybe_trigger()`` fires when ``actions_remaining <= 25 % of last chunk``
+(configurable).  Only one inference can be in flight at a time.
 
 * **Inference faster than execution** -- the trigger fires near the end of
   each chunk.  The result usually arrives before the buffer fully drains
@@ -188,10 +187,11 @@ class RTCAsyncInferenceClient:
                                               └─ add to buffer, signal done
 
     The background thread keeps at most *one* inference in flight.  It is
-    triggered when the action buffer drops to ``trigger_threshold`` (default
-    1).  This late trigger ensures that the observation sent to the server
-    is as fresh as possible.  An idle gap after the buffer drains is
-    preferred over executing actions derived from a stale observation.
+    triggered when the action buffer drops to 25 % of the last chunk size
+    (configurable via ``trigger_threshold``).  This late trigger ensures
+    that the observation sent to the server is as fresh as possible.  An
+    idle gap after the buffer drains is preferred over executing actions
+    derived from a stale observation.
     """
 
     def __init__(
@@ -200,7 +200,7 @@ class RTCAsyncInferenceClient:
         model_config: dict[str, str],
         control_freq: float = 10.0,
         action_horizon: int | None = None,
-        trigger_threshold: int = 1,
+        trigger_threshold: float = 0.25,
         max_buffer_size: int = 300,
         http_timeout: float = 120.0,
         default_latency: float = 1.0,
@@ -218,11 +218,14 @@ class RTCAsyncInferenceClient:
             control_freq: Robot control frequency in Hz.
             action_horizon: Max actions to keep from each chunk (after stale-
                 action skip).  ``None`` means use all remaining actions.
-            trigger_threshold: Request new inference when the buffer has this
-                many actions (or fewer) remaining.  A low value (default 1)
-                captures the freshest possible observation.  Set higher only
-                if you need to overlap inference with execution and can
-                tolerate older observations.
+            trigger_threshold: Fraction of the last chunk size at which to
+                request new inference (default 0.25 = 25 %).  The robot has
+                executed 75 % of the chunk by the time the observation is
+                captured, balancing freshness against leaving a small buffer
+                of remaining actions.  Set lower (e.g. 0.05) for the
+                freshest possible observation at the cost of a larger idle
+                gap.  Set higher (e.g. 0.5) to give inference more head
+                start at the cost of a slightly older observation.
             max_buffer_size: Hard cap on action buffer length.
             http_timeout: Timeout in seconds for HTTP requests.
             default_latency: Assumed latency (seconds) before any measurement
@@ -289,6 +292,11 @@ class RTCAsyncInferenceClient:
         # Snapshot of _actions_returned when the current inference started,
         # used to compute *actual* actions consumed (not an estimate).
         self._actions_returned_at_infer_start: int = 0
+
+        # Number of actions added to the buffer by the most recent ingest.
+        # Used by _maybe_trigger to compute the 25 % threshold.  Initialised
+        # to 1 so the very first trigger (before any chunk) fires immediately.
+        self._last_chunk_actions: int = 1
 
         # If the most recent chunk was interpolated, store its parameters so
         # we can map consumed interpolated actions back to original-trajectory
@@ -384,17 +392,20 @@ class RTCAsyncInferenceClient:
     # ------------------------------------------------------------------
 
     def _maybe_trigger(self) -> None:
-        """Request inference when the buffer is nearly exhausted.
+        """Request inference when the buffer drops to the threshold fraction.
 
-        Uses a fixed threshold so the observation is always captured as late
-        as possible (freshest state).  Any resulting idle gap is preferred
-        over actions derived from a stale observation.
+        The threshold is ``trigger_threshold * last_chunk_actions`` (default
+        25 % of the last chunk).  By the time the trigger fires the robot
+        has executed ~75 % of the chunk, giving the model a relatively fresh
+        observation while still leaving a small tail of actions to execute
+        during the network round-trip.
         """
         with self._inference_lock:
             if self._inference_pending:
                 return
 
-        if self.actions_remaining() <= self._trigger_threshold:
+        threshold = max(int(self._trigger_threshold * self._last_chunk_actions), 1)
+        if self.actions_remaining() <= threshold:
             self._trigger_event.set()
 
     def _avg_latency(self) -> float:
@@ -549,6 +560,8 @@ class RTCAsyncInferenceClient:
                     est_latency * 1000,
                 )
 
+                self._last_chunk_actions = target_count
+
                 with self._buffer_lock:
                     for a in resampled:
                         self._action_buffer.append(a)
@@ -556,6 +569,7 @@ class RTCAsyncInferenceClient:
 
         # --- Default: add raw actions ------------------------------------
         self._last_interp_params = None
+        self._last_chunk_actions = usable
         logger.debug(
             "[RTCAsync] Chunk ingest: chunk_size=%d  actual_consumed=%d  "
             "start=%d  usable=%d",
