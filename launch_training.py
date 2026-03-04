@@ -69,6 +69,7 @@ def build_workflow_cmd(
     keep_period = cfg["keep_period"]
     num_train_steps = cfg["num_train_steps"]
     action_horizon = cfg["action_horizon"]
+    use_delta = cfg.get("use_delta_joint_actions", False)
     wandb_flag = "--wandb-enabled" if cfg.get("wandb_enabled", True) else ""
 
     weight_path = base_checkpoint
@@ -87,7 +88,8 @@ def build_workflow_cmd(
         f"--save-interval {save_interval} "
         f"--keep-period {keep_period} "
         f"--num-train-steps {num_train_steps} "
-        f"--model.action-horizon {action_horizon}"
+        f"--model.action-horizon {action_horizon} "
+        f"--data.use-delta-joint-actions {str(use_delta).lower()}"
     )
 
     tg_curl = (
@@ -278,6 +280,7 @@ def main():
     print(f"  Steps:     {cfg['num_train_steps']}")
     print(f"  Batch:     {cfg['batch_size']}")
     print(f"  Horizon:   {cfg['action_horizon']}")
+    print(f"  Delta act: {cfg.get('use_delta_joint_actions', False)}")
     print(f"  Save every {cfg['save_interval']} steps, keep every {cfg['keep_period']} steps")
     print()
 
