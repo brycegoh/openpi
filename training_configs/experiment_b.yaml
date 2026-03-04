@@ -5,7 +5,7 @@
 #   WANDB_API_KEY=...
 
 # --- RunPod Pod Settings ---
-pod_name: "openpi-training"
+pod_name: "openpi_experiment_b"
 template_id: "8u8g3zo2jg"
 gpu_type: "NVIDIA A100-SXM4-80GB"
 gpu_count: 4
@@ -19,16 +19,17 @@ git_repo: "https://github.com/brycegoh/openpi.git"
 git_branch: "v2.1"
 
 # --- Training Settings ---
-dataset_repo: "griffinlabs/B017_dataset"
-base_model_repo: "griffinlabs/pi05_1877ep_pytorch"
-base_model_repo_path: "pi05_tcr_full_finetune_pytorch/pi05_1877ep/57000"   # optional: subfolder within repo, e.g. "pi05_tcr_full_finetune_pytorch/pi05_1877ep/54000"
-exp_name: "pi05_B017"
+dataset_repo: "griffinlabs/B006_B016_dataset"
+base_model_repo: "griffinlabs/pi05_pytorch_evaluated_base"
+base_model_repo_path: ""   # optional: subfolder within repo, e.g. "pi05_tcr_full_finetune_pytorch/pi05_1877ep/54000"
+exp_name: "pi05_B006_B016"
 batch_size: 384
 num_train_steps: 30000
-save_interval: 877         # checkpoint every N steps
-keep_period: 877            # keep checkpoints where step % keep_period == 0
-base_checkpoint: "/workspace/base_checkpoints/pi05_base_pytorch"
+save_interval: 4747         # checkpoint every N steps
+keep_period: 4747            # keep checkpoints where step % keep_period == 0
+base_checkpoint: "/workspace/base_checkpoints"
 checkpoint_base_dir: "/workspace/checkpoints"
+action_horizon: 50
 wandb_enabled: true
 num_gpus: 4                  # nproc_per_node for torchrun
 

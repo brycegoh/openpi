@@ -68,6 +68,7 @@ def build_workflow_cmd(
     save_interval = cfg["save_interval"]
     keep_period = cfg["keep_period"]
     num_train_steps = cfg["num_train_steps"]
+    action_horizon = cfg["action_horizon"]
     wandb_flag = "--wandb-enabled" if cfg.get("wandb_enabled", True) else ""
 
     weight_path = base_checkpoint
@@ -85,7 +86,8 @@ def build_workflow_cmd(
         f"--batch-size {batch_size} "
         f"--save-interval {save_interval} "
         f"--keep-period {keep_period} "
-        f"--num-train-steps {num_train_steps}"
+        f"--num-train-steps {num_train_steps} "
+        f"--model.action-horizon {action_horizon}"
     )
 
     tg_curl = (
@@ -144,7 +146,7 @@ def build_startup_cmd(
         workflow,
         "TRAIN_WORKFLOW_EOF",
         "chmod +x /tmp/train_workflow.sh",
-        "tmux new-session -d -s train 'bash /tmp/train_workflow.sh'",
+        "tmux new-session -d -s train 'bash /tmp/train_workflow.sh; exec bash'",
         "exit 0",
     ])
 
@@ -241,7 +243,7 @@ def main():
     parser = argparse.ArgumentParser(description="Launch a RunPod training job")
     parser.add_argument(
         "--config",
-        default="training_config.yaml",
+        default="training_configs/training_config.yaml",
         help="Path to YAML config file (default: training_config.yaml)",
     )
     parser.add_argument(
@@ -275,6 +277,7 @@ def main():
     print(f"  Exp name:  {cfg['exp_name']}")
     print(f"  Steps:     {cfg['num_train_steps']}")
     print(f"  Batch:     {cfg['batch_size']}")
+    print(f"  Horizon:   {cfg['action_horizon']}")
     print(f"  Save every {cfg['save_interval']} steps, keep every {cfg['keep_period']} steps")
     print()
 
