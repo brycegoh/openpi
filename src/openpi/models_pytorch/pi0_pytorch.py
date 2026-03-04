@@ -109,6 +109,8 @@ class PI0Pytorch(nn.Module):
             self.action_time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
 
         torch.set_float32_matmul_precision("high")
+        # Save uncompiled reference for RTC path (torch.compile + autograd don't mix)
+        self._sample_actions_uncompiled = self.sample_actions_with_rtc
         self.sample_actions = torch.compile(self.sample_actions, mode="max-autotune")
 
         # Initialize gradient checkpointing flag
@@ -373,8 +375,20 @@ class PI0Pytorch(nn.Module):
         return F.mse_loss(u_t, v_t, reduction="none")
 
     @torch.no_grad()
-    def sample_actions(self, device, observation, noise=None, num_steps=10) -> Tensor:
-        """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
+    def sample_actions(self, device, observation, noise=None, num_steps=10,
+                       prev_chunk_left_over=None, inference_delay=None, overlap_end=None) -> Tensor:
+        """Do a full inference forward and compute the action (batch_size x num_steps x num_motors).
+
+        When prev_chunk_left_over is provided, delegates to sample_actions_with_rtc
+        for RTC-guided denoising (uncompiled path with gradient support).
+        """
+        if prev_chunk_left_over is not None:
+            return self._sample_actions_uncompiled(
+                device, observation, noise=noise, num_steps=num_steps,
+                prev_chunk_left_over=prev_chunk_left_over,
+                inference_delay=inference_delay, overlap_end=overlap_end,
+            )
+
         bsize = observation.state.shape[0]
         if noise is None:
             actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
@@ -386,7 +400,6 @@ class PI0Pytorch(nn.Module):
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
 
-        # Compute image and language key value cache
         prefix_att_2d_masks_4d = self._prepare_attention_masks_4d(prefix_att_2d_masks)
         self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"  # noqa: SLF001
 
@@ -413,7 +426,72 @@ class PI0Pytorch(nn.Module):
                 expanded_time,
             )
 
-            # Euler step - use new tensor assignment instead of in-place operation
+            x_t = x_t + dt * v_t
+            time += dt
+        return x_t
+
+    def sample_actions_with_rtc(self, device, observation, noise=None, num_steps=10,
+                                prev_chunk_left_over=None, inference_delay=None,
+                                overlap_end=None) -> Tensor:
+        """Inference with RTC guidance. Not compiled; uses torch.no_grad() explicitly
+        so AsyncRTCProcessor can locally enable gradients for the correction term.
+        """
+        from openpi.policies.async_rtc_processor import AsyncRTCConfig, AsyncRTCProcessor
+
+        rtc_processor = AsyncRTCProcessor(AsyncRTCConfig(
+            enabled=True,
+            prefix_attention_schedule="linear",
+            full_trajectory_alignment=True,
+        ))
+
+        with torch.no_grad():
+            bsize = observation.state.shape[0]
+            if noise is None:
+                actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
+                noise = self.sample_noise(actions_shape, device)
+
+            images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=False)
+
+            prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
+            prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+            prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+
+            prefix_att_2d_masks_4d = self._prepare_attention_masks_4d(prefix_att_2d_masks)
+            self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"  # noqa: SLF001
+
+            _, past_key_values = self.paligemma_with_expert.forward(
+                attention_mask=prefix_att_2d_masks_4d,
+                position_ids=prefix_position_ids,
+                past_key_values=None,
+                inputs_embeds=[prefix_embs, None],
+                use_cache=True,
+            )
+
+        dt_val = -1.0 / num_steps
+        dt = torch.tensor(dt_val, dtype=torch.float32, device=device)
+
+        if prev_chunk_left_over is not None:
+            prev_chunk_left_over = prev_chunk_left_over.to(device=device, dtype=torch.float32)
+
+        x_t = noise
+        time = torch.tensor(1.0, dtype=torch.float32, device=device)
+        while time >= -dt / 2:
+            expanded_time = time.expand(bsize)
+
+            def _denoise_partial(x):
+                with torch.no_grad():
+                    return self.denoise_step(state, prefix_pad_masks, past_key_values, x, expanded_time)
+
+            v_t = rtc_processor.denoise_step(
+                x_t=x_t,
+                prev_chunk_left_over=prev_chunk_left_over,
+                inference_delay=inference_delay,
+                time=time,
+                original_denoise_step_partial=_denoise_partial,
+                overlap_end=overlap_end,
+                num_flow_matching_steps=num_steps,
+            )
+
             x_t = x_t + dt * v_t
             time += dt
         return x_t

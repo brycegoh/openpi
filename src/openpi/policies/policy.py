@@ -65,7 +65,9 @@ class Policy(BasePolicy):
             self._rng = rng or jax.random.key(0)
 
     @override
-    def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
+    def infer(self, obs: dict, *, noise: np.ndarray | None = None,  # type: ignore[misc]
+              prev_chunk_left_over=None, inference_delay: int | None = None,
+              overlap_end: int | None = None) -> dict:
         # Make a copy since transformations may modify the inputs in place.
         inputs = jax.tree.map(lambda x: x, obs)
         inputs = self._input_transform(inputs)
@@ -86,6 +88,12 @@ class Policy(BasePolicy):
             if noise.ndim == 2:  # If noise is (action_horizon, action_dim), add batch dimension
                 noise = noise[None, ...]  # Make it (1, action_horizon, action_dim)
             sample_kwargs["noise"] = noise
+
+        # Pass through RTC kwargs when provided (PyTorch only)
+        if prev_chunk_left_over is not None and self._is_pytorch_model:
+            sample_kwargs["prev_chunk_left_over"] = prev_chunk_left_over
+            sample_kwargs["inference_delay"] = inference_delay
+            sample_kwargs["overlap_end"] = overlap_end
 
         observation = _model.Observation.from_dict(inputs)
         start_time = time.monotonic()
