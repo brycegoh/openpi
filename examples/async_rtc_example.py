@@ -9,8 +9,10 @@ decouples inference latency from the control frequency so that:
 * When inference is **slower** than action execution, the client sends the
   next observation *before* the current chunk runs out, minimising gaps.
 
-The example ships with a built-in ``--mock`` mode that simulates server
-latency locally so you can test the pipeline without a deployed endpoint.
+With ``--interpolate``, the client resamples action waypoints along an
+ease-out curve when a chunk can't fill the inference window.  The robot
+decelerates toward the end of each window so the camera captures a
+sharp, blur-free frame for the next observation.
 
 Usage
 -----
@@ -26,8 +28,9 @@ With a deployed Modal server::
 Local mock mode (no server required)::
 
     python examples/async_rtc_example.py --mock
-    python examples/async_rtc_example.py --mock --mock-latency 0.8
-    python examples/async_rtc_example.py --mock --mock-latency 0.05
+    python examples/async_rtc_example.py --mock --mock-latency 4.0 --control-freq 30
+    python examples/async_rtc_example.py --mock --mock-latency 4.0 --control-freq 30 --interpolate
+    python examples/async_rtc_example.py --mock --mock-latency 4.0 --interpolate --damping-power 3
 """
 
 from __future__ import annotations
@@ -135,10 +138,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--duration", type=float, default=30.0, help="Run duration in seconds.")
 
     p.add_argument(
-        "--stretch", action="store_true",
-        help="Stretch actions across the inference window for continuous motion "
-             "at a reduced rate instead of full-speed bursts with idle gaps.",
+        "--interpolate", action="store_true",
+        help="Interpolate actions with ease-out dampening when inference is "
+             "slower than chunk execution.  The robot decelerates toward the "
+             "end of each window so the camera captures a sharp frame.",
     )
+    p.add_argument(
+        "--damping-power", type=float, default=2.0,
+        help="Ease-out exponent for --interpolate.  1=linear (no dampening), "
+             "2=quadratic, 3=cubic.  Higher = sharper deceleration at end.",
+    )
+
     p.add_argument("--mock", action="store_true", help="Use simulated inference (no server).")
     p.add_argument("--mock-latency", type=float, default=0.3, help="Simulated inference latency (s).")
     p.add_argument("--mock-chunk-size", type=int, default=50, help="Simulated action chunk size.")
@@ -190,7 +200,8 @@ def main() -> None:
         control_freq=args.control_freq,
         action_horizon=args.action_horizon,
         infer_fn=infer_fn,
-        stretch_actions=args.stretch,
+        interpolate_actions=args.interpolate,
+        damping_power=args.damping_power,
     ) as client:
 
         # -- Warmup: block until the first action chunk is ready. -----------
@@ -225,16 +236,14 @@ def main() -> None:
                     stats = client.get_stats()
                     logger.info(
                         "[%.1fs] steps=%d  buf=%d  chunks=%d  "
-                        "avg_lat=%.0fms  empty=%d  paced=%d  "
-                        "stretch=%.1fms",
+                        "avg_lat=%.0fms  empty=%d  interp_chunks=%d",
                         elapsed_total,
                         robot.steps_executed,
                         stats["buffer_size"],
                         stats["chunks_received"],
                         stats["avg_latency_ms"],
                         stats["empty_buffer_hits"],
-                        stats["paced_holds"],
-                        stats["stretch_interval_ms"],
+                        stats["interpolated_chunks"],
                     )
 
                 # Maintain control frequency
@@ -255,9 +264,8 @@ def main() -> None:
         logger.info("Action chunks received: %d", stats["chunks_received"])
         logger.info("Actions returned: %d", stats["actions_returned"])
         logger.info("Actions skipped (stale): %d", stats["actions_skipped"])
+        logger.info("Interpolated chunks: %d", stats["interpolated_chunks"])
         logger.info("Empty-buffer hits: %d", stats["empty_buffer_hits"])
-        logger.info("Paced holds (stretch): %d", stats["paced_holds"])
-        logger.info("Stretch interval: %.1fms", stats["stretch_interval_ms"])
         logger.info(
             "Inference latency: avg=%.0fms  last=%.0fms",
             stats["avg_latency_ms"],

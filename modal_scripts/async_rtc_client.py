@@ -10,22 +10,25 @@ control frequency.  It handles both cases:
   to the server *before* the current chunk runs out, minimising the window
   where the robot has no fresh actions.
 
-The current ``rtc_eval.py`` approach estimates latency and requests new actions
-based on that estimate, but this breaks when the latency exceeds the chunk
-execution time.  ``RTCAsyncInferenceClient`` solves this by always keeping at
-most one inference in flight and triggering the next request as soon as the
-buffer runs low -- rather than relying on a fixed latency estimate.
+When ``interpolate_actions=True`` and the chunk cannot fill the inference
+window at the requested ``control_freq``, the client resamples the action
+waypoints along an **ease-out** curve so that:
+
+1. The robot covers most of the planned trajectory early, then
+2. decelerates smoothly toward the end of the window.
+
+The deceleration means the robot is nearly stationary right when the next
+observation is captured, reducing motion blur and giving the model a sharper
+image to plan from.
 
 Usage (see also ``examples/async_rtc_example.py``)::
 
     client = RTCAsyncInferenceClient(
         server_url="https://…modal.run",
-        model_config={
-            "hf_repo_id": "user/repo",
-            "folder_path": "checkpoints/pi05_rtc",
-            "config_name": "pi05_rtc",
-        },
-        control_freq=10.0,
+        model_config={...},
+        control_freq=30.0,
+        interpolate_actions=True,   # enable interpolation + dampening
+        damping_power=2.0,          # quadratic ease-out
     )
 
     obs = robot.get_observation()
@@ -47,6 +50,7 @@ from __future__ import annotations
 import collections
 import functools
 import logging
+import math
 import threading
 import time
 from typing import Any, Callable
@@ -95,6 +99,62 @@ unpackb = functools.partial(msgpack.unpackb, object_hook=_unpack_array)
 
 
 # ---------------------------------------------------------------------------
+# Interpolation helpers
+# ---------------------------------------------------------------------------
+
+def interpolate_with_damping(
+    actions: np.ndarray,
+    target_count: int,
+    power: float = 2.0,
+) -> list[np.ndarray]:
+    """Resample *actions* into *target_count* steps with ease-out dampening.
+
+    The ease-out curve ``s(t) = 1 - (1 - t)^power`` maps uniform time
+    ``t in [0, 1]`` to non-uniform progress ``s`` through the original
+    action sequence.  Early timesteps advance quickly through the waypoints
+    (robot moves fast), while late timesteps barely advance (robot
+    decelerates).  At ``t = 1`` the velocity is zero -- the robot is
+    stationary, giving the camera a blur-free frame for the next
+    observation.
+
+    Args:
+        actions: Array of shape ``(N, action_dim)`` -- the raw waypoints.
+        target_count: Number of output actions to produce (typically
+            ``ceil(est_latency * control_freq)``).
+        power: Exponent of the ease-out curve.  ``1`` is linear (no
+            dampening), ``2`` is quadratic, ``3`` is cubic, etc.  Higher
+            values produce sharper deceleration.
+
+    Returns:
+        List of ``target_count`` arrays, each of shape ``(action_dim,)``.
+    """
+    n = len(actions)
+    if n == 0:
+        return []
+    if n == 1:
+        return [actions[0].copy() for _ in range(target_count)]
+
+    result: list[np.ndarray] = []
+    last_idx = n - 1
+
+    for i in range(target_count):
+        t = i / max(target_count - 1, 1)
+
+        # Ease-out: fast start, decelerating to zero velocity at t=1
+        s = 1.0 - (1.0 - t) ** power
+
+        idx_f = s * last_idx
+        lo = int(idx_f)
+        hi = min(lo + 1, last_idx)
+        frac = idx_f - lo
+
+        interpolated = actions[lo] * (1.0 - frac) + actions[hi] * frac
+        result.append(interpolated)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Core client
 # ---------------------------------------------------------------------------
 
@@ -110,7 +170,7 @@ class RTCAsyncInferenceClient:
           ├─ if buffer low → trigger  ───────→  read latest obs
           ├─ check for completed result       │  POST /infer to server
           │    → add actions to buffer        │  receive action chunk
-          └─ return buffer.popleft()          │  skip stale actions
+          └─ return buffer.popleft()          │  (interpolate if needed)
                                               └─ add to buffer, signal done
 
     The background thread keeps at most *one* inference in flight.  It is
@@ -129,7 +189,8 @@ class RTCAsyncInferenceClient:
         http_timeout: float = 120.0,
         default_latency: float = 1.0,
         infer_fn: Callable[[dict], dict] | None = None,
-        stretch_actions: bool = False,
+        interpolate_actions: bool = False,
+        damping_power: float = 2.0,
     ):
         """
         Args:
@@ -149,14 +210,18 @@ class RTCAsyncInferenceClient:
             infer_fn: Optional override for the inference call.  Signature:
                 ``(obs_with_config: dict) -> result_dict``.  Useful for
                 testing or local mock servers.
-            stretch_actions: When ``True`` and inference is slower than chunk
-                execution, the client *slows down* action delivery so that
-                the available actions are spread evenly across the expected
-                inference window.  This gives continuous (but slower) motion
-                instead of full-speed bursts followed by idle gaps.
-                When ``False`` (default) actions are always delivered at
+            interpolate_actions: When ``True`` and inference is slower than
+                chunk execution, resample the action waypoints with ease-out
+                dampening to fill the full inference window at
+                ``control_freq``.  The robot decelerates toward the end so
+                the camera captures a sharp frame for the next observation.
+                When ``False`` (default) actions are delivered at
                 ``control_freq`` and ``step()`` returns ``None`` when the
                 buffer is empty.
+            damping_power: Exponent for the ease-out curve used when
+                ``interpolate_actions`` is ``True``.  ``1.0`` = linear
+                (no dampening), ``2.0`` = quadratic, ``3.0`` = cubic.
+                Higher values produce sharper deceleration at the end.
         """
         self._server_url = server_url.rstrip("/")
         self._model_config = dict(model_config)
@@ -166,7 +231,8 @@ class RTCAsyncInferenceClient:
         self._http_timeout = http_timeout
         self._default_latency = default_latency
         self._infer_fn = infer_fn
-        self._stretch_actions = stretch_actions
+        self._interpolate = interpolate_actions
+        self._damping_power = damping_power
 
         # Thread-safe action buffer (individual timestep arrays)
         self._action_buffer: collections.deque[np.ndarray] = collections.deque(
@@ -200,16 +266,17 @@ class RTCAsyncInferenceClient:
         self._chunks_received = 0
         self._actions_skipped = 0
         self._empty_count = 0
-        self._paced_count = 0
+        self._interpolated_chunks = 0
 
         # Snapshot of _actions_returned when the current inference started,
         # used to compute *actual* actions consumed (not an estimate).
         self._actions_returned_at_infer_start: int = 0
 
-        # Stretch-mode pacing state.  _stretch_interval > 0 means the client
-        # is actively slowing down delivery; 0 means deliver at full speed.
-        self._stretch_interval: float = 0.0
-        self._last_action_time: float = 0.0
+        # If the most recent chunk was interpolated, store its parameters so
+        # we can map consumed interpolated actions back to original-trajectory
+        # progress when computing the stale-action skip for the NEXT chunk.
+        # Format: (original_waypoints, target_count, power) or None.
+        self._last_interp_params: tuple[int, int, float] | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -219,9 +286,8 @@ class RTCAsyncInferenceClient:
         """Update observation, maybe trigger inference, return next action.
 
         Call this once per control-loop iteration.  Returns ``None`` when the
-        buffer is empty **or** when stretch-mode is pacing delivery to avoid
-        idle gaps (the robot should hold its last position or take a safe
-        default action in either case).
+        buffer is empty (the robot should hold its last position or take a
+        safe default action).
         """
         with self._obs_lock:
             self._latest_obs = obs
@@ -229,20 +295,12 @@ class RTCAsyncInferenceClient:
         self._maybe_trigger()
 
         with self._buffer_lock:
-            if not self._action_buffer:
-                self._empty_count += 1
-                return None
+            if self._action_buffer:
+                self._actions_returned += 1
+                return self._action_buffer.popleft()
 
-            if self._stretch_actions and self._stretch_interval > 0:
-                now = time.monotonic()
-                if now - self._last_action_time < self._stretch_interval:
-                    self._paced_count += 1
-                    return None
-
-            action = self._action_buffer.popleft()
-            self._actions_returned += 1
-            self._last_action_time = time.monotonic()
-            return action
+        self._empty_count += 1
+        return None
 
     def warmup(self, obs: dict, timeout: float = 120.0) -> np.ndarray:
         """Block until the first action chunk arrives.
@@ -284,12 +342,11 @@ class RTCAsyncInferenceClient:
             "actions_returned": self._actions_returned,
             "chunks_received": self._chunks_received,
             "actions_skipped": self._actions_skipped,
+            "interpolated_chunks": self._interpolated_chunks,
             "empty_buffer_hits": self._empty_count,
-            "paced_holds": self._paced_count,
             "avg_latency_ms": avg_lat * 1000,
             "last_latency_ms": self._last_latency * 1000,
             "buffer_size": self.actions_remaining(),
-            "stretch_interval_ms": self._stretch_interval * 1000,
         }
 
     def close(self) -> None:
@@ -415,42 +472,77 @@ class RTCAsyncInferenceClient:
 
         chunk_size = actions.shape[0]
 
-        # ``actual_consumed`` is the number of actions the main thread
-        # actually popped from the buffer while inference was in flight.
-        # This is the correct skip count: if the buffer was empty (robot
-        # idle) during inference, actual_consumed is 0 and we keep the
-        # whole chunk.  The old approach of ``int(latency * freq)`` over-
-        # estimated when the robot had nothing to execute.
-        start = min(actual_consumed, chunk_size - 1)
+        # ``actual_consumed`` counts buffer pops during inference.  When the
+        # previous chunk was interpolated (N waypoints → M steps with ease-
+        # out), those M consumed steps do NOT correspond to M original
+        # actions of trajectory progress -- the dampening curve means the
+        # robot covered fewer equivalent waypoints.  We invert the ease-out
+        # to recover the true trajectory progress.
+        if self._last_interp_params is not None and actual_consumed > 0:
+            orig_n, target_m, power = self._last_interp_params
+            t = min(actual_consumed / max(target_m, 1), 1.0)
+            s = 1.0 - (1.0 - t) ** power
+            effective_consumed = int(s * orig_n)
+            logger.debug(
+                "[RTCAsync] Inverse map: %d interpolated consumed → "
+                "%d equivalent original (N=%d M=%d p=%.1f)",
+                actual_consumed, effective_consumed, orig_n, target_m, power,
+            )
+        else:
+            effective_consumed = actual_consumed
+
+        start = min(effective_consumed, chunk_size - 1)
 
         end = chunk_size
         if self._action_horizon is not None:
             end = min(start + self._action_horizon, chunk_size)
 
         self._actions_skipped += start
-
         usable = end - start
 
-        # Compute stretch pacing for this chunk.
-        if self._stretch_actions and usable > 0:
+        # --- Interpolation with dampening --------------------------------
+        # If enabled and the usable actions can't fill the estimated
+        # inference window at control_freq, resample them with an ease-out
+        # curve so the robot decelerates toward the end.
+        if self._interpolate and usable >= 1:
             natural_duration = usable / self._control_freq
             est_latency = self._avg_latency()
-            if natural_duration < est_latency:
-                self._stretch_interval = est_latency / usable
-            else:
-                self._stretch_interval = 0.0
-        else:
-            self._stretch_interval = 0.0
 
+            if natural_duration < est_latency:
+                target_count = math.ceil(est_latency * self._control_freq)
+                resampled = interpolate_with_damping(
+                    actions[start:end],
+                    target_count,
+                    power=self._damping_power,
+                )
+                self._interpolated_chunks += 1
+                self._last_interp_params = (
+                    usable, target_count, self._damping_power,
+                )
+
+                logger.debug(
+                    "[RTCAsync] Interpolated: %d waypoints → %d actions  "
+                    "(power=%.1f, est_lat=%.0fms)",
+                    usable,
+                    target_count,
+                    self._damping_power,
+                    est_latency * 1000,
+                )
+
+                with self._buffer_lock:
+                    for a in resampled:
+                        self._action_buffer.append(a)
+                return
+
+        # --- Default: add raw actions ------------------------------------
+        self._last_interp_params = None
         logger.debug(
             "[RTCAsync] Chunk ingest: chunk_size=%d  actual_consumed=%d  "
-            "est_consumed=%d  start=%d  usable=%d  stretch=%.1fms",
+            "start=%d  usable=%d",
             chunk_size,
             actual_consumed,
-            int(latency * self._control_freq),
             start,
             usable,
-            self._stretch_interval * 1000,
         )
 
         with self._buffer_lock:
