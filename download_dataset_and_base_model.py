@@ -19,7 +19,7 @@ while True:
     try:
         snapshot_download(
             repo_id=os.environ.get("BASE_MODEL_REPO_ID"),
-            local_dir="/workspace/base_checkpoints/pi05_base_pytorch",
+            local_dir="/workspace/base_checkpoints",
             repo_type="model",
             **base_model_kwargs,
         )
