@@ -138,7 +138,8 @@ def endpoint():
     import sys
     import importlib.util
     from pathlib import Path
-    from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+    from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+    from fastapi.responses import Response
     import msgpack_numpy
 
     # Override openpi.training.config with our custom config before importing
@@ -403,6 +404,70 @@ def endpoint():
             logger.error(f"Failed to load policy: {e}")
             logger.error(traceback.format_exc())
             raise
+
+    @web_app.post("/infer")
+    async def infer_handler(request: Request):
+        """Stateless HTTP inference endpoint for async/concurrent clients.
+
+        Accepts msgpack-encoded observation with model configuration.
+        Returns msgpack-encoded action chunk.
+
+        Required fields in request body:
+            hf_repo_id, folder_path, config_name
+        Optional fields:
+            prompt, dataset_repo_id, stats_json_path
+        All other fields are treated as observation data.
+        """
+        body = await request.body()
+        obs = msgpack_numpy.unpackb(body)
+
+        hf_repo_id = obs.pop("hf_repo_id", None)
+        folder_path = obs.pop("folder_path", None)
+        config_name = obs.pop("config_name", None)
+        prompt = obs.pop("prompt", None)
+        dataset_repo_id = obs.pop("dataset_repo_id", None)
+        stats_json_path = obs.pop("stats_json_path", None)
+
+        if not all([hf_repo_id, folder_path, config_name]):
+            return Response(
+                content=b"Missing required fields: hf_repo_id, folder_path, config_name",
+                status_code=400,
+            )
+
+        try:
+            policy = load_policy(
+                hf_repo_id, folder_path, config_name,
+                prompt, dataset_repo_id, stats_json_path,
+            )
+        except Exception as e:
+            logger.error(f"[POST /infer] Failed to load policy: {e}")
+            logger.error(traceback.format_exc())
+            return Response(
+                content=traceback.format_exc().encode(),
+                status_code=500,
+            )
+
+        try:
+            start_time = time.monotonic()
+
+            if prompt is not None:
+                obs["prompt"] = prompt
+            action = policy.infer(obs)
+
+            infer_time = time.monotonic() - start_time
+            action["server_timing"] = {"infer_ms": infer_time * 1000}
+
+            return Response(
+                content=msgpack_numpy.packb(action),
+                media_type="application/x-msgpack",
+            )
+        except Exception as e:
+            logger.error(f"[POST /infer] Inference failed: {e}")
+            logger.error(traceback.format_exc())
+            return Response(
+                content=traceback.format_exc().encode(),
+                status_code=500,
+            )
 
     @web_app.websocket("/ws")
     async def websocket_handler(websocket: WebSocket) -> None:
