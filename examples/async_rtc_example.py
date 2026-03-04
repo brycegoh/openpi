@@ -134,6 +134,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--action-horizon", type=int, default=None, help="Actions to use per chunk.")
     p.add_argument("--duration", type=float, default=30.0, help="Run duration in seconds.")
 
+    p.add_argument(
+        "--stretch", action="store_true",
+        help="Stretch actions across the inference window for continuous motion "
+             "at a reduced rate instead of full-speed bursts with idle gaps.",
+    )
     p.add_argument("--mock", action="store_true", help="Use simulated inference (no server).")
     p.add_argument("--mock-latency", type=float, default=0.3, help="Simulated inference latency (s).")
     p.add_argument("--mock-chunk-size", type=int, default=50, help="Simulated action chunk size.")
@@ -185,6 +190,7 @@ def main() -> None:
         control_freq=args.control_freq,
         action_horizon=args.action_horizon,
         infer_fn=infer_fn,
+        stretch_actions=args.stretch,
     ) as client:
 
         # -- Warmup: block until the first action chunk is ready. -----------
@@ -219,13 +225,16 @@ def main() -> None:
                     stats = client.get_stats()
                     logger.info(
                         "[%.1fs] steps=%d  buf=%d  chunks=%d  "
-                        "avg_lat=%.0fms  empty=%d",
+                        "avg_lat=%.0fms  empty=%d  paced=%d  "
+                        "stretch=%.1fms",
                         elapsed_total,
                         robot.steps_executed,
                         stats["buffer_size"],
                         stats["chunks_received"],
                         stats["avg_latency_ms"],
                         stats["empty_buffer_hits"],
+                        stats["paced_holds"],
+                        stats["stretch_interval_ms"],
                     )
 
                 # Maintain control frequency
@@ -247,6 +256,8 @@ def main() -> None:
         logger.info("Actions returned: %d", stats["actions_returned"])
         logger.info("Actions skipped (stale): %d", stats["actions_skipped"])
         logger.info("Empty-buffer hits: %d", stats["empty_buffer_hits"])
+        logger.info("Paced holds (stretch): %d", stats["paced_holds"])
+        logger.info("Stretch interval: %.1fms", stats["stretch_interval_ms"])
         logger.info(
             "Inference latency: avg=%.0fms  last=%.0fms",
             stats["avg_latency_ms"],

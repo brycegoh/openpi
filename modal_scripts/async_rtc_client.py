@@ -129,6 +129,7 @@ class RTCAsyncInferenceClient:
         http_timeout: float = 120.0,
         default_latency: float = 1.0,
         infer_fn: Callable[[dict], dict] | None = None,
+        stretch_actions: bool = False,
     ):
         """
         Args:
@@ -148,6 +149,14 @@ class RTCAsyncInferenceClient:
             infer_fn: Optional override for the inference call.  Signature:
                 ``(obs_with_config: dict) -> result_dict``.  Useful for
                 testing or local mock servers.
+            stretch_actions: When ``True`` and inference is slower than chunk
+                execution, the client *slows down* action delivery so that
+                the available actions are spread evenly across the expected
+                inference window.  This gives continuous (but slower) motion
+                instead of full-speed bursts followed by idle gaps.
+                When ``False`` (default) actions are always delivered at
+                ``control_freq`` and ``step()`` returns ``None`` when the
+                buffer is empty.
         """
         self._server_url = server_url.rstrip("/")
         self._model_config = dict(model_config)
@@ -157,6 +166,7 @@ class RTCAsyncInferenceClient:
         self._http_timeout = http_timeout
         self._default_latency = default_latency
         self._infer_fn = infer_fn
+        self._stretch_actions = stretch_actions
 
         # Thread-safe action buffer (individual timestep arrays)
         self._action_buffer: collections.deque[np.ndarray] = collections.deque(
@@ -190,10 +200,16 @@ class RTCAsyncInferenceClient:
         self._chunks_received = 0
         self._actions_skipped = 0
         self._empty_count = 0
+        self._paced_count = 0
 
         # Snapshot of _actions_returned when the current inference started,
         # used to compute *actual* actions consumed (not an estimate).
         self._actions_returned_at_infer_start: int = 0
+
+        # Stretch-mode pacing state.  _stretch_interval > 0 means the client
+        # is actively slowing down delivery; 0 means deliver at full speed.
+        self._stretch_interval: float = 0.0
+        self._last_action_time: float = 0.0
 
     # ------------------------------------------------------------------
     # Public API
@@ -203,22 +219,30 @@ class RTCAsyncInferenceClient:
         """Update observation, maybe trigger inference, return next action.
 
         Call this once per control-loop iteration.  Returns ``None`` when the
-        buffer is empty (the robot should hold its last position or take a
-        safe default action).
+        buffer is empty **or** when stretch-mode is pacing delivery to avoid
+        idle gaps (the robot should hold its last position or take a safe
+        default action in either case).
         """
         with self._obs_lock:
             self._latest_obs = obs
 
         self._maybe_trigger()
-        self._collect_if_done()
 
         with self._buffer_lock:
-            if self._action_buffer:
-                self._actions_returned += 1
-                return self._action_buffer.popleft()
+            if not self._action_buffer:
+                self._empty_count += 1
+                return None
 
-        self._empty_count += 1
-        return None
+            if self._stretch_actions and self._stretch_interval > 0:
+                now = time.monotonic()
+                if now - self._last_action_time < self._stretch_interval:
+                    self._paced_count += 1
+                    return None
+
+            action = self._action_buffer.popleft()
+            self._actions_returned += 1
+            self._last_action_time = time.monotonic()
+            return action
 
     def warmup(self, obs: dict, timeout: float = 120.0) -> np.ndarray:
         """Block until the first action chunk arrives.
@@ -261,9 +285,11 @@ class RTCAsyncInferenceClient:
             "chunks_received": self._chunks_received,
             "actions_skipped": self._actions_skipped,
             "empty_buffer_hits": self._empty_count,
+            "paced_holds": self._paced_count,
             "avg_latency_ms": avg_lat * 1000,
             "last_latency_ms": self._last_latency * 1000,
             "buffer_size": self.actions_remaining(),
+            "stretch_interval_ms": self._stretch_interval * 1000,
         }
 
     def close(self) -> None:
@@ -293,9 +319,6 @@ class RTCAsyncInferenceClient:
         ) + 1
         if remaining <= threshold:
             self._trigger_event.set()
-
-    def _collect_if_done(self) -> None:
-        """No-op -- results are pushed by the inference thread directly."""
 
     def _avg_latency(self) -> float:
         if not self._latencies:
@@ -406,14 +429,28 @@ class RTCAsyncInferenceClient:
 
         self._actions_skipped += start
 
+        usable = end - start
+
+        # Compute stretch pacing for this chunk.
+        if self._stretch_actions and usable > 0:
+            natural_duration = usable / self._control_freq
+            est_latency = self._avg_latency()
+            if natural_duration < est_latency:
+                self._stretch_interval = est_latency / usable
+            else:
+                self._stretch_interval = 0.0
+        else:
+            self._stretch_interval = 0.0
+
         logger.debug(
             "[RTCAsync] Chunk ingest: chunk_size=%d  actual_consumed=%d  "
-            "est_consumed=%d  start=%d  usable=%d",
+            "est_consumed=%d  start=%d  usable=%d  stretch=%.1fms",
             chunk_size,
             actual_consumed,
             int(latency * self._control_freq),
             start,
-            end - start,
+            usable,
+            self._stretch_interval * 1000,
         )
 
         with self._buffer_lock:
