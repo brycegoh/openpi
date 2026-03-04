@@ -371,9 +371,24 @@ class RTCAsyncInferenceClient:
                 return
 
         remaining = self.actions_remaining()
-        threshold = int(
-            self._avg_latency() * self._control_freq * self._latency_buf_mult
-        ) + 1
+
+        if self._interpolate:
+            # Trigger LATE: capture the observation while the robot is in the
+            # dampened tail of the trajectory (nearly stationary → sharp
+            # camera frame).  This means the next chunk is based on a fresh
+            # observation instead of one that is ``latency`` seconds stale.
+            # The trade-off is an idle gap roughly equal to the inference
+            # latency, which is acceptable -- stale actions are worse than
+            # no actions.
+            threshold = 1
+        else:
+            # Without interpolation there is no dampening guarantee, so
+            # trigger early enough that the next chunk can (ideally) arrive
+            # before the buffer drains.
+            threshold = int(
+                self._avg_latency() * self._control_freq * self._latency_buf_mult
+            ) + 1
+
         if remaining <= threshold:
             self._trigger_event.set()
 
