@@ -72,24 +72,8 @@ from pathlib import Path
 
 import modal
 
-REPO_URL = "https://github.com/brycegoh/openpi.git"
-BRANCH = "feat/rtc"
-
-image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .apt_install("git", "git-lfs")
-    .pip_install("uv")
-    .run_commands(
-        f"GIT_LFS_SKIP_SMUDGE=1 git clone --branch {BRANCH} --single-branch --recurse-submodules {REPO_URL} /app/openpi",
-    )
-    .run_commands(
-        "cd /app/openpi && GIT_LFS_SKIP_SMUDGE=1 uv sync",
-        "cd /app/openpi && GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .",
-        "cd /app/openpi && cp -r src/openpi/models_pytorch/transformers_replace/* .venv/lib/python3.11/site-packages/transformers/",
-        "cd /app/openpi && find .venv/lib/python3.11/site-packages/transformers -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true",
-        "cd /app/openpi && uv pip install fastapi websockets msgpack-numpy sortedcontainers",
-    )
-    .env({"PATH": "/app/openpi/.venv/bin:$PATH"})
+image = modal.Image.from_dockerfile(
+    "v21_openpi.Dockerfile",
 )
 
 app = modal.App(
@@ -127,7 +111,7 @@ def endpoint():
     import sys
     from pathlib import Path
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-    import msgpack_numpy
+    from openpi_client import msgpack_numpy
 
     from openpi.policies import policy_config as _policy_config
     from openpi.training import config as _config
