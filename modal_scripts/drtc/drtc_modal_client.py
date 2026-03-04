@@ -28,12 +28,14 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import traceback
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 from openpi_client import msgpack_numpy
 import modal
+import websockets.exceptions
 import websockets.sync.client
 
 from .lww_register import LWWRegister
@@ -396,11 +398,17 @@ class DRTCModalClient:
 
                 self._ws.send(self._packer.pack(msg))
 
+            except websockets.exceptions.ConnectionClosed as e:
+                if not self._shutdown_event.is_set():
+                    logger.warning(f"DRTC obs sender: WebSocket connection closed: {e}")
+                    self._shutdown_event.set()
+                break
             except Exception as e:
                 if self._shutdown_event.is_set():
                     break
-                logger.error(f"DRTC obs sender error: {e}")
-                time.sleep(0.1)
+                logger.error(f"DRTC obs sender error: {e}\n{traceback.format_exc()}")
+                self._shutdown_event.set()
+                break
 
     # ------------------------------------------------------------------
     # Background thread: action receiver
@@ -455,12 +463,14 @@ class DRTCModalClient:
 
             except TimeoutError:
                 continue
-            except websockets.exceptions.ConnectionClosed:
+            except websockets.exceptions.ConnectionClosed as e:
                 if not self._shutdown_event.is_set():
-                    logger.warning("DRTC: WebSocket connection closed by server")
+                    logger.warning(f"DRTC action receiver: WebSocket connection closed by server: {e}")
+                    self._shutdown_event.set()
                 break
             except Exception as e:
                 if self._shutdown_event.is_set():
                     break
-                logger.error(f"DRTC action receiver error: {e}")
-                time.sleep(0.1)
+                logger.error(f"DRTC action receiver error: {e}\n{traceback.format_exc()}")
+                self._shutdown_event.set()
+                break
