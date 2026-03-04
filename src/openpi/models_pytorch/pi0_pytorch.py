@@ -9,6 +9,10 @@ import torch.nn.functional as F  # noqa: N812
 import openpi.models.gemma as _gemma
 from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
 import openpi.models_pytorch.preprocessing_pytorch as _preprocessing
+from openpi.policies.rtc_processor_pytorch import (
+    RTCConfig,
+    get_prefix_weights,
+)
 
 
 def get_safe_dtype(target_dtype, device_type):
@@ -459,3 +463,114 @@ class PI0Pytorch(nn.Module):
         suffix_out = suffix_out[:, -self.config.action_horizon :]
         suffix_out = suffix_out.to(dtype=torch.float32)
         return self.action_out_proj(suffix_out)
+
+    def sample_actions_rtc(
+        self,
+        device,
+        observation,
+        *,
+        noise=None,
+        num_steps=10,
+        prev_actions=None,
+        rtc_config: RTCConfig | None = None,
+    ) -> Tensor:
+        """Sample actions with RTC inpainting correction via VJP.
+
+        When prev_actions is provided, the denoising process is guided to produce
+        actions that are temporally consistent with the previous chunk using a
+        pseudoinverse-based velocity correction (from the RTC paper).
+
+        Falls back to standard sample_actions when prev_actions is None.
+        """
+        if prev_actions is None or rtc_config is None or not rtc_config.enabled:
+            return self.sample_actions(device, observation, noise=noise, num_steps=num_steps)
+
+        bsize = observation.state.shape[0]
+        if noise is None:
+            actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
+            noise = self.sample_noise(actions_shape, device)
+
+        # Build the prev_action_chunk target (padded to full action_horizon)
+        prev_actions_t = prev_actions.to(device=device, dtype=noise.dtype)
+        if prev_actions_t.ndim == 2:
+            prev_actions_t = prev_actions_t.unsqueeze(0)
+        prev_len = prev_actions_t.shape[1]
+        if prev_len < self.config.action_horizon:
+            pad = torch.zeros(
+                bsize, self.config.action_horizon - prev_len, self.config.action_dim,
+                device=device, dtype=noise.dtype,
+            )
+            prev_action_chunk = torch.cat([prev_actions_t, pad], dim=1)
+        else:
+            prev_action_chunk = prev_actions_t[:, : self.config.action_horizon]
+
+        with torch.no_grad():
+            images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(
+                observation, train=False
+            )
+
+            prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
+                images, img_masks, lang_tokens, lang_masks
+            )
+            prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+            prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+
+            prefix_att_2d_masks_4d = self._prepare_attention_masks_4d(prefix_att_2d_masks)
+            self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"
+
+            _, past_key_values = self.paligemma_with_expert.forward(
+                attention_mask=prefix_att_2d_masks_4d,
+                position_ids=prefix_position_ids,
+                past_key_values=None,
+                inputs_embeds=[prefix_embs, None],
+                use_cache=True,
+            )
+
+        dt = -1.0 / num_steps
+        dt_t = torch.tensor(dt, dtype=torch.float32, device=device)
+        time = torch.tensor(1.0, dtype=torch.float32, device=device)
+
+        weights = get_prefix_weights(
+            start=0,
+            end=rtc_config.execution_horizon,
+            total=self.config.action_horizon,
+            schedule=rtc_config.prefix_attention_schedule,
+            device=device,
+        )
+
+        x_t = noise.detach()
+
+        while time >= -dt_t / 2:
+            expanded_time = time.expand(bsize)
+
+            # Enable gradients for x_t so we can compute VJP
+            x_t_grad = x_t.detach().requires_grad_(True)
+
+            with torch.enable_grad():
+                v_t = self.denoise_step(
+                    state,
+                    prefix_pad_masks,
+                    past_key_values,
+                    x_t_grad,
+                    expanded_time,
+                )
+                x_1 = x_t_grad + v_t * (1.0 - time)
+                error = (prev_action_chunk - x_1) * weights[None, :, None]
+                pinv_correction = torch.autograd.grad(
+                    outputs=x_1,
+                    inputs=x_t_grad,
+                    grad_outputs=error,
+                    retain_graph=False,
+                )[0]
+
+            t_val = time.item()
+            inv_r2 = (t_val ** 2 + (1.0 - t_val) ** 2) / max((1.0 - t_val) ** 2, 1e-8)
+            c = (1.0 - t_val) / max(t_val, 1e-8)
+            c = min(c, rtc_config.max_guidance_weight)
+            guidance_weight = min(c * inv_r2, rtc_config.max_guidance_weight)
+
+            v_t_corrected = v_t.detach() + guidance_weight * pinv_correction.detach()
+            x_t = x_t + dt_t * v_t_corrected
+            time = time + dt_t
+
+        return x_t.detach()

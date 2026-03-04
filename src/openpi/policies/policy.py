@@ -66,6 +66,10 @@ class Policy(BasePolicy):
 
     @override
     def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
+        # Extract RTC parameters before transformations
+        prev_actions = obs.pop("_rtc_prev_actions", None)
+        rtc_config_dict = obs.pop("_rtc_config", None)
+
         # Make a copy since transformations may modify the inputs in place.
         inputs = jax.tree.map(lambda x: x, obs)
         inputs = self._input_transform(inputs)
@@ -89,17 +93,52 @@ class Policy(BasePolicy):
 
         observation = _model.Observation.from_dict(inputs)
         start_time = time.monotonic()
+
+        # Use RTC path if prev_actions provided and model supports it
+        use_rtc = (
+            self._is_pytorch_model
+            and prev_actions is not None
+            and rtc_config_dict is not None
+            and hasattr(self._model, "sample_actions_rtc")
+        )
+
+        if use_rtc:
+            from openpi.policies.rtc_processor_pytorch import RTCConfig, RTCAttentionSchedule
+            rtc_cfg = RTCConfig(
+                enabled=rtc_config_dict.get("enabled", True),
+                prefix_attention_schedule=RTCAttentionSchedule(
+                    rtc_config_dict.get("prefix_attention_schedule", "LINEAR")
+                ),
+                max_guidance_weight=rtc_config_dict.get("max_guidance_weight", 5.0),
+                execution_horizon=rtc_config_dict.get("execution_horizon", 10),
+            )
+            prev_actions_tensor = torch.from_numpy(np.array(prev_actions)).to(self._pytorch_device)
+            if prev_actions_tensor.ndim == 2:
+                prev_actions_tensor = prev_actions_tensor.unsqueeze(0)
+            raw_actions = self._model.sample_actions_rtc(
+                sample_rng_or_pytorch_device,
+                observation,
+                prev_actions=prev_actions_tensor,
+                rtc_config=rtc_cfg,
+                **sample_kwargs,
+            )
+        else:
+            raw_actions = self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs)
+
         outputs = {
             "state": inputs["state"],
-            "actions": self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs),
+            "actions": raw_actions,
         }
         model_time = time.monotonic() - start_time
         if self._is_pytorch_model:
+            raw_actions_np = np.asarray(raw_actions[0, ...].detach().cpu())
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...].detach().cpu()), outputs)
         else:
+            raw_actions_np = np.asarray(raw_actions[0, ...])
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
 
         outputs = self._output_transform(outputs)
+        outputs["raw_actions"] = raw_actions_np
         outputs["policy_timing"] = {
             "infer_ms": model_time * 1000,
         }
