@@ -543,7 +543,8 @@ class PI0Pytorch(nn.Module):
         while time >= -dt_t / 2:
             expanded_time = time.expand(bsize)
 
-            # Enable gradients for x_t so we can compute VJP
+            # requires_grad BEFORE the forward pass so the VJP flows through the model
+            # (unlike lerobot's approach where grad is set after, yielding correction=error)
             x_t_grad = x_t.detach().requires_grad_(True)
 
             with torch.enable_grad():
@@ -554,22 +555,32 @@ class PI0Pytorch(nn.Module):
                     x_t_grad,
                     expanded_time,
                 )
-                x_1 = x_t_grad + v_t * (1.0 - time)
-                error = (prev_action_chunk - x_1) * weights[None, :, None]
+                # Pi0 convention (time: 1→0): predicted clean sample = x_t - time * v_t
+                # (kinetix convention (t: 0→1) uses x_t + v_t*(1-t) which is equivalent)
+                x_0_pred = x_t_grad - time * v_t
+                error = (prev_action_chunk - x_0_pred) * weights[None, :, None]
                 pinv_correction = torch.autograd.grad(
-                    outputs=x_1,
+                    outputs=x_0_pred,
                     inputs=x_t_grad,
                     grad_outputs=error,
                     retain_graph=False,
                 )[0]
 
+            # Guidance weight adapted for pi0 convention (time: 1→0).
+            # Convert to kinetix convention: tau = 1 - time (tau: 0→1).
+            # See https://github.com/huggingface/lerobot/issues/2511
             t_val = time.item()
-            inv_r2 = (t_val ** 2 + (1.0 - t_val) ** 2) / max((1.0 - t_val) ** 2, 1e-8)
-            c = (1.0 - t_val) / max(t_val, 1e-8)
+            tau = 1.0 - t_val
+            sq_one_minus_tau = (1.0 - tau) ** 2  # = time^2
+            inv_r2 = (sq_one_minus_tau + tau ** 2) / max(sq_one_minus_tau, 1e-8)
+            c = (1.0 - tau) / max(tau, 1e-8)  # = time / (1 - time)
             c = min(c, rtc_config.max_guidance_weight)
             guidance_weight = min(c * inv_r2, rtc_config.max_guidance_weight)
 
-            v_t_corrected = v_t.detach() + guidance_weight * pinv_correction.detach()
+            # Subtraction because pi0 Euler step uses negative dt (time goes 1→0).
+            # With dt<0: x' = x + dt*(v - g*correction) = x - |dt|*v + |dt|*g*correction
+            # The +|dt|*g*correction term pushes x toward reducing the error.
+            v_t_corrected = v_t.detach() - guidance_weight * pinv_correction.detach()
             x_t = x_t + dt_t * v_t_corrected
             time = time + dt_t
 

@@ -3,11 +3,16 @@
 RTC improves real-time inference by treating chunk generation as an inpainting problem,
 strategically handling overlapping timesteps between action chunks using prefix attention
 weights and VJP-based correction during the denoising process.
+
+Reference implementation:
+    https://github.com/Physical-Intelligence/real-time-chunking-kinetix/blob/main/src/model.py
+Sign convention verified against:
+    https://github.com/huggingface/lerobot/issues/2511
 """
 
 import enum
 import dataclasses
-import logging
+import math
 
 import torch
 
@@ -36,6 +41,9 @@ def get_prefix_weights(
 ) -> torch.Tensor:
     """Compute prefix attention weights for RTC inpainting.
 
+    Matches the kinetix reference:
+    https://github.com/Physical-Intelligence/real-time-chunking-kinetix/blob/main/src/model.py#L40
+
     With start=2, end=6, total=10, the LINEAR schedule output will be:
         1  1  4/5 3/5 2/5 1/5 0  0  0  0
             ^              ^
@@ -53,15 +61,12 @@ def get_prefix_weights(
     elif schedule == RTCAttentionSchedule.ZEROS:
         w = (indices < start).float()
     elif schedule in (RTCAttentionSchedule.LINEAR, RTCAttentionSchedule.EXP):
-        denom = max(end - start, 1)
-        w = torch.where(
-            indices < start,
-            torch.ones_like(indices),
-            torch.clamp((end - indices) / denom, 0, 1),
-        )
+        # Matches kinetix: clip((start - 1 - i) / (end - start + 1) + 1, 0, 1)
+        # which simplifies to: clip((end - i) / (end - start + 1), 0, 1)
+        denom = max(end - start + 1, 1)
+        w = torch.clamp((end - indices) / denom, 0, 1)
         if schedule == RTCAttentionSchedule.EXP:
-            e_minus_1 = torch.tensor(torch.e - 1, device=device)
-            w = w * torch.expm1(w) / e_minus_1
+            w = w * torch.expm1(w) / (math.e - 1)
     else:
         raise ValueError(f"Unknown schedule: {schedule}")
 
