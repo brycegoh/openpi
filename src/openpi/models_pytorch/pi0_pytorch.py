@@ -111,7 +111,7 @@ class PI0Pytorch(nn.Module):
         torch.set_float32_matmul_precision("high")
         # Save uncompiled reference for RTC path (torch.compile + autograd don't mix)
         self._sample_actions_uncompiled = self.sample_actions_with_rtc
-        self.sample_actions = torch.compile(self.sample_actions, mode="max-autotune")
+        # self.sample_actions = torch.compile(self.sample_actions, mode="max-autotune")
 
         # Initialize gradient checkpointing flag
         self.gradient_checkpointing_enabled = False

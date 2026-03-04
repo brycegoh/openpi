@@ -75,7 +75,7 @@ import modal
 image = modal.Image.from_dockerfile(
     "v21_openpi.Dockerfile",
 ).run_commands(
-    "cd /app/openpi && git pull",
+    "cd /app/openpi && git pull origin feat/rtc",
 )
 
 app = modal.App(
@@ -89,7 +89,7 @@ _checkpoint_cache: dict[tuple[str, str], Path] = {}
 # Policy cache to avoid reloading the same policy (includes compiled models)
 _policy_cache: dict[tuple[str, ...], any] = {}
 
-logging.basicConfig(level=logging.INFO, force=True)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", force=True)
 logger = logging.getLogger(__name__)
 
 
@@ -593,13 +593,33 @@ def endpoint():
             finally:
                 shutdown_event.set()
 
+        async def _heartbeat():
+            """Send periodic heartbeats to keep the WebSocket alive through Modal's proxy."""
+            try:
+                while not shutdown_event.is_set():
+                    await asyncio.sleep(0.5)
+                    try:
+                        await websocket.send_bytes(packer.pack({"type": "heartbeat"}))
+                    except Exception:
+                        break
+            finally:
+                shutdown_event.set()
+
         logger.info(f"DRTC: Entering async mode (action_horizon={action_horizon}, fps={fps}, rtc={rtc_enabled})")
 
-        await asyncio.gather(
+        task_names = ["_drtc_receive_obs", "_drtc_infer_and_send", "_heartbeat"]
+        results = await asyncio.gather(
             _drtc_receive_obs(),
             _drtc_infer_and_send(),
+            _heartbeat(),
             return_exceptions=True,
         )
+        for i, result in enumerate(results):
+            if isinstance(result, BaseException):
+                logger.error(
+                    f"DRTC: Task {task_names[i]} raised an exception: {result}",
+                    exc_info=result,
+                )
         logger.info("DRTC: Async loop ended")
 
     # ------------------------------------------------------------------
