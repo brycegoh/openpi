@@ -147,13 +147,53 @@ def test_drtc(args):
     actions_received = 0
     starved_count = 0
 
+    # Warmup: keep sending observations at target rate until the first action
+    # chunk arrives from the server, just like a real robot would.
+    logger.info("Warming up: sending observations and waiting for first action chunk...")
+    warmup_start = time.monotonic()
+    warmup_ticks = 0
+    while client.running:
+        obs = make_random_obs(args.prompt)
+        t0 = time.monotonic()
+        try:
+            result = client.infer(obs)
+        except RuntimeError as e:
+            logger.error(f"Warmup: Client stopped unexpectedly: {e}")
+            client.stop()
+            return
+
+        warmup_ticks += 1
+        if result.get("actions") is not None:
+            logger.info(
+                f"Warmup complete after {warmup_ticks} ticks "
+                f"({(time.monotonic() - warmup_start)*1000:.0f}ms). "
+                f"First action received."
+            )
+            break
+
+        if warmup_ticks % 50 == 0:
+            logger.info(f"Warmup: {warmup_ticks} ticks, still waiting for first action...")
+
+        elapsed = time.monotonic() - t0
+        sleep_time = max(0, dt - elapsed)
+        if sleep_time > 0:
+            time.sleep(sleep_time)
+    else:
+        logger.error("Client disconnected during warmup")
+        client.stop()
+        return
+
     logger.info(f"Running {args.steps} control steps at {args.fps} Hz (dt={dt*1000:.0f}ms)...")
 
     for step in range(args.steps):
         obs = make_random_obs(args.prompt)
 
         t0 = time.monotonic()
-        result = client.infer(obs)
+        try:
+            result = client.infer(obs)
+        except RuntimeError as e:
+            logger.error(f"Step {step}: Client stopped unexpectedly: {e}")
+            break
         infer_ms = (time.monotonic() - t0) * 1000
 
         action = result.get("actions")
@@ -175,7 +215,6 @@ def test_drtc(args):
                 f"cd={cooldown}, starved={starved}, infer_ms={infer_ms:.1f}"
             )
 
-        # Rate-limit to target fps
         elapsed = time.monotonic() - t0
         sleep_time = max(0, dt - elapsed)
         if sleep_time > 0:
@@ -184,6 +223,7 @@ def test_drtc(args):
     client.stop()
 
     logger.info("--- DRTC Results ---")
+    logger.info(f"  Warmup ticks:    {warmup_ticks}")
     logger.info(f"  Steps:           {args.steps}")
     logger.info(f"  Actions received: {actions_received}/{args.steps}")
     logger.info(f"  Starvations:     {starved_count}/{args.steps}")
@@ -206,7 +246,7 @@ def main():
     parser.add_argument("--stats-json-path", default=DEFAULTS["stats_json_path"])
     # DRTC-specific
     parser.add_argument("--action-horizon", type=int, default=50)
-    parser.add_argument("--fps", type=int, default=50)
+    parser.add_argument("--fps", type=int, default=15)
     parser.add_argument("--rtc", action="store_true", help="Enable RTC guidance (DRTC mode only)")
 
     args = parser.parse_args()
