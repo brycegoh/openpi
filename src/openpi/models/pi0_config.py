@@ -10,7 +10,7 @@ from openpi.models import model as _model
 import openpi.models.gemma as _gemma
 from openpi.shared import array_typing as at
 import openpi.shared.nnx_utils as nnx_utils
-from scripts.rtc_eval import RTCConfig
+from openpi.policies.rtc_processor import RTCConfig
 
 if TYPE_CHECKING:
     from openpi.models.pi0 import Pi0
