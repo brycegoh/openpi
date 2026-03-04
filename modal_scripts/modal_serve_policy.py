@@ -464,6 +464,14 @@ def endpoint():
                         f"Step {step_count}: Received observation with keys: {list(obs.keys())}"
                     )
 
+                    # Extract RTC parameters (kept in obs as _rtc_* keys for Policy.infer)
+                    rtc_prev_actions = obs.pop("rtc_prev_actions", None)
+                    rtc_config = obs.pop("rtc_config", None)
+                    if rtc_prev_actions is not None:
+                        obs["_rtc_prev_actions"] = rtc_prev_actions
+                    if rtc_config is not None:
+                        obs["_rtc_config"] = rtc_config
+
                     # Check if model specification is included in the observation
                     hf_repo_id = obs.pop("hf_repo_id", None)
                     folder_path = obs.pop("folder_path", None)
