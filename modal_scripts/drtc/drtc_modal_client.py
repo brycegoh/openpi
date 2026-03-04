@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-import msgpack_numpy
+from openpi_client import msgpack_numpy
 import modal
 import websockets.sync.client
 

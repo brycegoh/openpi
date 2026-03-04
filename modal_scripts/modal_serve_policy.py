@@ -74,6 +74,8 @@ import modal
 
 image = modal.Image.from_dockerfile(
     "v21_openpi.Dockerfile",
+).run_commands(
+    "cd /app/openpi && git pull",
 )
 
 app = modal.App(
