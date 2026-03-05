@@ -3,7 +3,7 @@ import websockets
 import websockets.sync.client
 import modal
 from typing import Any
-import msgpack_numpy
+import openpi_client.msgpack_numpy as msgpack_numpy
 
 logger = logging.getLogger(__name__)
 

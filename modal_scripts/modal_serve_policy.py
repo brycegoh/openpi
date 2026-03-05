@@ -139,7 +139,7 @@ def endpoint():
     import importlib.util
     from pathlib import Path
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-    import msgpack_numpy
+    import openpi_client.msgpack_numpy as msgpack_numpy
 
     # Override openpi.training.config with our custom config before importing
     spec = importlib.util.spec_from_file_location(
