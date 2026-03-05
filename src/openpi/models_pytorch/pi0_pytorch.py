@@ -495,6 +495,11 @@ class PI0Pytorch(nn.Module):
         if prev_actions_t.ndim == 2:
             prev_actions_t = prev_actions_t.unsqueeze(0)
         prev_len = prev_actions_t.shape[1]
+
+        # Clamp execution_horizon to available prev_actions length so blending
+        # weights don't extend into zero-padded positions (matches lerobot guard).
+        effective_execution_horizon = min(rtc_config.execution_horizon, prev_len)
+
         if prev_len < self.config.action_horizon:
             pad = torch.zeros(
                 bsize, self.config.action_horizon - prev_len, self.config.action_dim,
@@ -532,7 +537,7 @@ class PI0Pytorch(nn.Module):
 
         weights = get_prefix_weights(
             start=0,
-            end=rtc_config.execution_horizon,
+            end=effective_execution_horizon,
             total=self.config.action_horizon,
             schedule=rtc_config.prefix_attention_schedule,
             device=device,
