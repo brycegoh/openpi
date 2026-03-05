@@ -111,6 +111,7 @@ class Policy(BasePolicy):
                 ),
                 max_guidance_weight=rtc_config_dict.get("max_guidance_weight", 5.0),
                 execution_horizon=rtc_config_dict.get("execution_horizon", 10),
+                inference_delay=rtc_config_dict.get("inference_delay", 0),
             )
             prev_actions_tensor = torch.from_numpy(np.array(prev_actions)).to(self._pytorch_device)
             if prev_actions_tensor.ndim == 2:

@@ -29,7 +29,12 @@ class RTCConfig:
     enabled: bool = True
     prefix_attention_schedule: RTCAttentionSchedule = RTCAttentionSchedule.LINEAR
     max_guidance_weight: float = 5.0
+    # Minimum execution horizon (s_min). The effective execution horizon is
+    # s = max(execution_horizon, inference_delay), and the overlap region end
+    # is computed as H - s.  This prevents the soft blending region from
+    # collapsing when inference latency exceeds s_min.
     execution_horizon: int = 10
+    inference_delay: int = 0
 
 
 def get_prefix_weights(

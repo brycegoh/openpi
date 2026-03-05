@@ -30,6 +30,7 @@ import numpy as np
 
 from rtc_client import image_tools as _image_tools
 from rtc_client.base_policy import BasePolicy
+from rtc_client.latency_estimator import JKLatencyEstimator
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +159,7 @@ class RTCInferenceManager:
         refill_threshold: float = 0.25,
         rtc_enabled: bool = True,
         rtc_config: Optional[Dict] = None,
+        control_hz: float = 50.0,
     ):
         self._policy = policy
         self._get_observation = get_observation_fn
@@ -178,6 +180,10 @@ class RTCInferenceManager:
         self._inference_count = 0
         self._total_inference_time = 0.0
         self._cold_start_time = 0.0
+        self._latency_estimator = JKLatencyEstimator(
+            control_hz=control_hz,
+            action_horizon=action_horizon,
+        )
 
     @property
     def action_queue(self) -> RTCActionQueue:
@@ -310,7 +316,10 @@ class RTCInferenceManager:
             prev_raw = self._action_queue.get_raw_leftover()
             if prev_raw is not None:
                 obs["_rtc_prev_actions"] = prev_raw
-            obs["_rtc_config"] = self._rtc_config
+            obs["_rtc_config"] = {
+                **self._rtc_config,
+                "inference_delay": self._latency_estimator.estimate_steps,
+            }
 
         result = self._policy.infer(obs)
 
@@ -321,6 +330,7 @@ class RTCInferenceManager:
         else:
             self._inference_count += 1
             self._total_inference_time += elapsed
+            self._latency_estimator.update(elapsed)
 
         actions = result.get("actions")
         raw_actions = result.get("raw_actions")

@@ -530,9 +530,15 @@ class PI0Pytorch(nn.Module):
         dt_t = torch.tensor(dt, dtype=torch.float32, device=device)
         time = torch.tensor(1.0, dtype=torch.float32, device=device)
 
+        # DRTC dynamic execution horizon: s = max(s_min, d), overlap_end = H - s
+        # This ensures the soft blending region doesn't collapse when d > s_min.
+        d = rtc_config.inference_delay
+        s = max(rtc_config.execution_horizon, d)
+        overlap_end = max(0, self.config.action_horizon - s)
+
         weights = get_prefix_weights(
-            start=0,
-            end=rtc_config.execution_horizon,
+            start=d,
+            end=overlap_end,
             total=self.config.action_horizon,
             schedule=rtc_config.prefix_attention_schedule,
             device=device,
