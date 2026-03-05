@@ -24,7 +24,7 @@ Usage:
 import logging
 import time
 import threading
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 import numpy as np
 
@@ -189,14 +189,12 @@ class RTCInferenceManager:
     def action_queue(self) -> RTCActionQueue:
         return self._action_queue
 
-    def start(self, wait_for_first_action: bool = True, first_action_timeout: float = 300.0) -> None:
+    def start(self, wait_for_first_action: bool = True) -> None:
         """Start the background inference thread.
 
         Args:
             wait_for_first_action: If True, block until the first inference completes
                 so the action queue is populated before returning.
-            first_action_timeout: Max seconds to wait for the first inference (default
-                300s to accommodate Modal cold starts with model download/loading).
         """
         if self._inference_thread is not None and self._inference_thread.is_alive():
             logger.warning("Inference thread already running")
@@ -219,14 +217,12 @@ class RTCInferenceManager:
 
         if wait_for_first_action:
             logger.info("Waiting for first inference to complete...")
-            if not self._first_inference_done.wait(timeout=first_action_timeout):
-                logger.warning("Timed out waiting for first inference after %.1fs", first_action_timeout)
-            else:
-                logger.info(
-                    "First inference (cold start) complete in %.1fms, action queue has %d actions",
-                    self._cold_start_time * 1000,
-                    self._action_queue.remaining(),
-                )
+            self._first_inference_done.wait()
+            logger.info(
+                "First inference (cold start) complete in %.1fms, action queue has %d actions",
+                self._cold_start_time * 1000,
+                self._action_queue.remaining(),
+            )
 
     def stop(self) -> None:
         """Stop the inference thread and wait for it to finish."""
@@ -368,3 +364,75 @@ class RTCInferenceManager:
             consumed,
             self._action_queue.remaining(),
         )
+
+
+class InterpolatedActionWrapper:
+    """Wrapper that linearly interpolates between model actions to lengthen execution time.
+
+    Sits between the consumer and RTCInferenceManager.get_action(). Does not modify
+    the action queue—raw_actions and leftover chunks for RTC inpainting stay unchanged.
+
+    With factor=1.7, each model action yields ~1.7 control steps on average, giving
+    inference ~70% more time per chunk.
+
+    Args:
+        manager: The RTCInferenceManager to wrap.
+        factor: Steps per model action (>= 1.0). Default 1.7.
+    """
+
+    def __init__(
+        self,
+        manager: RTCInferenceManager,
+        factor: float = 1.7,
+    ):
+        if factor < 1.0:
+            raise ValueError("factor must be >= 1.0")
+        self._manager = manager
+        self._factor = factor
+        self._buffer: List[np.ndarray] = []
+        self._prev: Optional[np.ndarray] = None
+        self._accumulator: float = 0.0
+
+    def get_action(self) -> Optional[np.ndarray]:
+        if self._buffer:
+            return self._buffer.pop(0)
+
+        next_action = self._manager.get_action()
+        if next_action is None:
+            return None
+
+        if self._prev is None:
+            self._prev = next_action.copy()
+            return next_action
+
+        self._accumulator += self._factor
+        steps = max(1, int(self._accumulator))
+        self._accumulator -= steps
+
+        for i in range(1, steps):
+            t = i / steps
+            self._buffer.append(
+                self._prev + t * (next_action - self._prev)
+            )
+        self._buffer.append(next_action.copy())
+        self._prev = next_action.copy()
+
+        return self._buffer.pop(0)
+
+    @property
+    def action_queue(self) -> RTCActionQueue:
+        """Passthrough to underlying manager's action queue."""
+        return self._manager.action_queue
+
+    def start(
+        self,
+        wait_for_first_action: bool = True,
+    ) -> None:
+        """Delegate to manager.start()."""
+        self._manager.start(
+            wait_for_first_action=wait_for_first_action,
+        )
+
+    def stop(self) -> None:
+        """Delegate to manager.stop()."""
+        self._manager.stop()

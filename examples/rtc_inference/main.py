@@ -26,7 +26,27 @@ Usage (with a mock policy for local testing without a server):
 
 Usage (RTC disabled, simple sequential chunking):
     python main.py --modal-app-name openpi-policy-server-rtc-1 --no-rtc
+
+Usage (with action interpolation to give inference more time, default 1.7x):
+    python main.py --modal-app-name openpi-policy-server-rtc-1 --interpolation-factor 1.7
 """
+
+
+HF_REPO_ID = "griffinlabs/pi05_B017_1877_ckpt"
+FOLDER_PATH = "pi05_tcr_full_finetune_pytorch/pi05_B017/4385"
+IS_RADIANS=False
+CONFIG_NAME = "pi05_tcr_full_finetune_pytorch"
+PROMPT = "Clean the countertop"
+
+# HF_REPO_ID = "griffinlabs/pi05_jax_rad_b001_b005"
+# FOLDER_PATH = "pi05_tcr_full_finetune/b001_b005_jax/1000"
+# IS_RADIANS=True
+# CONFIG_NAME = "pi05_tcr_full_finetune"
+# PROMPT = "Clean the countertop"
+
+# Dataset configuration
+DATASET_REPO_ID: str | None = "griffinlabs/B017_dataset"
+STATS_JSON_PATH: str | None = "./norm_stats.json"
 
 import dataclasses
 import logging
@@ -195,6 +215,7 @@ class Args:
     action_horizon: int = 50
     action_dim: int = 14
     control_hz: float = 30.0
+    interpolation_factor: float = 1.7  # Linear interpolation to lengthen actions (1.0 = disabled)
 
     # RTC parameters
     rtc: bool = True
@@ -386,6 +407,7 @@ def plot_timeline(
 
 
 def main(args: Args) -> None:
+    from rtc_client import InterpolatedActionWrapper
     from rtc_client import RTCInferenceManager
 
     timing_log = TimingLog()
@@ -452,17 +474,24 @@ def main(args: Args) -> None:
         control_hz=args.control_hz,
     )
 
+    if args.interpolation_factor > 1.0:
+        action_source = InterpolatedActionWrapper(manager, factor=args.interpolation_factor)
+    else:
+        action_source = manager
+
     logger.info("Starting RTC inference manager...")
     logger.info("  Action horizon: %d", args.action_horizon)
     logger.info("  Control Hz: %.1f", args.control_hz)
     logger.info("  Refill threshold: %.0f%% (%d actions)", args.refill_threshold * 100, int(args.action_horizon * args.refill_threshold))
+    if args.interpolation_factor > 1.0:
+        logger.info("  Interpolation factor: %.1f (lengthens actions for more inference time)", args.interpolation_factor)
     logger.info("  RTC enabled: %s", args.rtc)
     if args.rtc:
         logger.info("  Execution horizon: %d", args.execution_horizon)
         logger.info("  Attention schedule: %s", args.prefix_attention_schedule)
     logger.info("  Duration: %.1fs", args.duration)
 
-    manager.start()
+    action_source.start()
 
     timing_log.clear()
 
@@ -477,7 +506,7 @@ def main(args: Args) -> None:
         while (time.time() - start_time) < args.duration:
             loop_start = time.perf_counter()
 
-            action = manager.get_action()
+            action = action_source.get_action()
 
             if action is not None:
                 robot.execute_action(action)
@@ -491,7 +520,7 @@ def main(args: Args) -> None:
             now = time.time()
             if now - last_report_time >= 5.0:
                 elapsed = now - start_time
-                queue_remaining = manager.action_queue.remaining()
+                queue_remaining = action_source.action_queue.remaining()
                 hit_rate = actions_executed / max(actions_executed + actions_missed, 1) * 100
                 logger.info(
                     "[%.1fs] executed=%d missed=%d hit_rate=%.1f%% queue=%d inferences=%d",
@@ -513,7 +542,7 @@ def main(args: Args) -> None:
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
     finally:
-        manager.stop()
+        action_source.stop()
 
     elapsed = time.time() - start_time
     total_steps = actions_executed + actions_missed
