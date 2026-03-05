@@ -45,7 +45,7 @@ RUN uv venv --python 3.11.9 $UV_PROJECT_ENVIRONMENT
 
 # Clone openpi repository
 RUN git clone https://github.com/brycegoh/openpi.git .
-RUN git checkout feat/rtc-implementation
+RUN git checkout b68f1ada26430b8ce4c5e36487025c0e60a17c3d
 
 # Install openpi and its dependencies using the lockfile
 RUN GIT_LFS_SKIP_SMUDGE=1 uv sync

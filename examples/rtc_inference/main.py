@@ -449,6 +449,7 @@ def main(args: Args) -> None:
         refill_threshold=args.refill_threshold,
         rtc_enabled=args.rtc,
         rtc_config=rtc_config,
+        control_hz=args.control_hz,
     )
 
     logger.info("Starting RTC inference manager...")
