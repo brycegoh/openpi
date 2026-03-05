@@ -27,10 +27,20 @@ import threading
 from typing import Callable, Dict, Optional
 
 import numpy as np
+import abc
+from typing import Dict
 
-from openpi_client import base_policy as _base_policy
+from openpi_client import image_tools as _image_tools
 
 logger = logging.getLogger(__name__)
+class BasePolicy(abc.ABC):
+    @abc.abstractmethod
+    def infer(self, obs: Dict) -> Dict:
+        """Infer actions from observations."""
+
+    def reset(self) -> None:
+        """Reset the policy to its initial state."""
+        pass
 
 
 class RTCActionQueue:
@@ -151,7 +161,7 @@ class RTCInferenceManager:
 
     def __init__(
         self,
-        policy: _base_policy.BasePolicy,
+        policy: BasePolicy,
         get_observation_fn: Callable[[], Dict],
         action_horizon: int,
         refill_threshold: float = 0.25,
@@ -244,6 +254,39 @@ class RTCInferenceManager:
         """Get the next action from the queue. Returns None if no action available."""
         return self._action_queue.get()
 
+    @staticmethod
+    def _is_image_array(arr: np.ndarray) -> bool:
+        if arr.ndim != 3:
+            return False
+        h, w, c = arr.shape
+        if c in (1, 3, 4) and h > 4 and w > 4:
+            return True  # HWC
+        if h in (1, 3, 4) and w > 4 and c > 4:
+            return True  # CHW
+        return False
+
+    @staticmethod
+    def _ensure_hwc(arr: np.ndarray) -> np.ndarray:
+        """Transpose CHW to HWC if needed. resize_with_pad expects HWC."""
+        if arr.ndim == 3 and arr.shape[0] in (1, 3, 4) and arr.shape[-1] not in (1, 3, 4):
+            return np.transpose(arr, (1, 2, 0))
+        return arr
+
+    def _preprocess_images(self, obs: dict) -> dict:
+        """Resize all detected image arrays in *obs* to 224x224 and convert to uint8."""
+        out: dict = {}
+        for key, value in obs.items():
+            if isinstance(value, dict):
+                out[key] = self._preprocess_images(value)
+            elif isinstance(value, np.ndarray) and self._is_image_array(value):
+                img = self._ensure_hwc(value)
+                img = _image_tools.convert_to_uint8(img)
+                img = _image_tools.resize_with_pad(img, 224, 224)
+                out[key] = img
+            else:
+                out[key] = value
+        return out
+
     def _inference_loop(self) -> None:
         """Background loop that triggers inference when action queue runs low."""
         threshold_count = max(1, int(self._action_horizon * self._refill_threshold))
@@ -270,6 +313,7 @@ class RTCInferenceManager:
         start_time = time.monotonic()
 
         obs = self._get_observation()
+        obs = self._preprocess_images(obs)
 
         if self._rtc_enabled:
             prev_raw = self._action_queue.get_raw_leftover()
