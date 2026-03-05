@@ -70,6 +70,4 @@ RUN uv pip install huggingface_hub hf_transfer pandas pyarrow tqdm
 # Set HF transfer for faster downloads
 ENV HF_HUB_ENABLE_HF_TRANSFER=1
 
-RUN git checkout 915f1cd287571d71b5fa58d665e71724c35bb7df
-
 WORKDIR /app

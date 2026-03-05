@@ -172,21 +172,31 @@ class RTCInferenceManager:
 
         self._action_queue = RTCActionQueue()
         self._shutdown_event = threading.Event()
+        self._first_inference_done = threading.Event()
         self._inference_thread: Optional[threading.Thread] = None
         self._inference_count = 0
         self._total_inference_time = 0.0
+        self._cold_start_time = 0.0
 
     @property
     def action_queue(self) -> RTCActionQueue:
         return self._action_queue
 
-    def start(self) -> None:
-        """Start the background inference thread."""
+    def start(self, wait_for_first_action: bool = True, first_action_timeout: float = 300.0) -> None:
+        """Start the background inference thread.
+
+        Args:
+            wait_for_first_action: If True, block until the first inference completes
+                so the action queue is populated before returning.
+            first_action_timeout: Max seconds to wait for the first inference (default
+                300s to accommodate Modal cold starts with model download/loading).
+        """
         if self._inference_thread is not None and self._inference_thread.is_alive():
             logger.warning("Inference thread already running")
             return
 
         self._shutdown_event.clear()
+        self._first_inference_done.clear()
         self._inference_thread = threading.Thread(
             target=self._inference_loop,
             daemon=True,
@@ -200,6 +210,17 @@ class RTCInferenceManager:
             self._rtc_enabled,
         )
 
+        if wait_for_first_action:
+            logger.info("Waiting for first inference to complete...")
+            if not self._first_inference_done.wait(timeout=first_action_timeout):
+                logger.warning("Timed out waiting for first inference after %.1fs", first_action_timeout)
+            else:
+                logger.info(
+                    "First inference (cold start) complete in %.1fms, action queue has %d actions",
+                    self._cold_start_time * 1000,
+                    self._action_queue.remaining(),
+                )
+
     def stop(self) -> None:
         """Stop the inference thread and wait for it to finish."""
         self._shutdown_event.set()
@@ -207,10 +228,14 @@ class RTCInferenceManager:
             self._inference_thread.join(timeout=10.0)
             self._inference_thread = None
 
+        self._first_inference_done.clear()
+
+        if self._cold_start_time > 0:
+            logger.info("Cold start inference: %.1fms (excluded from stats)", self._cold_start_time * 1000)
         if self._inference_count > 0:
             avg_ms = (self._total_inference_time / self._inference_count) * 1000
             logger.info(
-                "Stopped RTC inference manager. %d inferences, avg %.1fms",
+                "Stopped RTC inference manager. %d inferences (excl. cold start), avg %.1fms",
                 self._inference_count,
                 avg_ms,
             )
@@ -233,6 +258,8 @@ class RTCInferenceManager:
 
             try:
                 self._run_inference()
+                if not self._first_inference_done.is_set():
+                    self._first_inference_done.set()
             except Exception:
                 logger.exception("Error in inference loop")
                 time.sleep(0.1)
@@ -253,8 +280,12 @@ class RTCInferenceManager:
         result = self._policy.infer(obs)
 
         elapsed = time.monotonic() - start_time
-        self._inference_count += 1
-        self._total_inference_time += elapsed
+        is_cold_start = not self._first_inference_done.is_set()
+        if is_cold_start:
+            self._cold_start_time = elapsed
+        else:
+            self._inference_count += 1
+            self._total_inference_time += elapsed
 
         actions = result.get("actions")
         raw_actions = result.get("raw_actions")
@@ -285,9 +316,10 @@ class RTCInferenceManager:
                 raw_actions=raw_actions,
             )
 
+        label = "cold_start" if is_cold_start else f"#{self._inference_count}"
         logger.debug(
-            "Inference #%d: %.1fms, consumed_during=%d, new_queue_size=%d",
-            self._inference_count,
+            "Inference %s: %.1fms, consumed_during=%d, new_queue_size=%d",
+            label,
             elapsed * 1000,
             consumed,
             self._action_queue.remaining(),

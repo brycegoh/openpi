@@ -61,7 +61,7 @@ class MockRobot:
             "images": {},
             "prompt": "pick up the object",
         }
-        camera_names = ["cam_high", "cam_low", "cam_left_wrist", "cam_right_wrist"]
+        camera_names = ["top", "left", "right"]
         for i in range(self._num_cameras):
             name = camera_names[i % len(camera_names)]
             obs["images"][name] = np.random.randint(
@@ -117,6 +117,10 @@ class TimingLog:
         with self._lock:
             self._events.append(ev)
 
+    def clear(self) -> None:
+        with self._lock:
+            self._events.clear()
+
     @property
     def events(self) -> list[TimingEvent]:
         with self._lock:
@@ -171,6 +175,14 @@ class Args:
     port: int | None = 8000
     api_key: str | None = None
 
+    # Policy configuration (required for Modal server — included in every observation)
+    hf_repo_id: str | None = None
+    folder_path: str | None = None
+    config_name: str | None = None
+    prompt: str | None = None
+    dataset_repo_id: str | None = None
+    stats_json_path: str | None = None
+
     # Use a mock policy instead of connecting to a server
     use_mock_policy: bool = False
     mock_latency_ms: float = 200.0
@@ -178,14 +190,14 @@ class Args:
     # Action parameters
     action_horizon: int = 50
     action_dim: int = 14
-    control_hz: float = 50.0
+    control_hz: float = 30.0
 
     # RTC parameters
     rtc: bool = True
     execution_horizon: int = 10
     prefix_attention_schedule: str = "LINEAR"
     max_guidance_weight: float = 5.0
-    refill_threshold: float = 0.25
+    refill_threshold: float = 0.50
 
     # Run duration
     duration: float = 30.0
@@ -399,6 +411,26 @@ def main(args: Args) -> None:
 
     policy = InstrumentedPolicy(raw_policy, timing_log)
 
+    # Build extra fields injected into every observation for the Modal server.
+    server_obs_fields: dict = {}
+    if args.hf_repo_id:
+        server_obs_fields["hf_repo_id"] = args.hf_repo_id
+    if args.folder_path:
+        server_obs_fields["folder_path"] = args.folder_path
+    if args.config_name:
+        server_obs_fields["config_name"] = args.config_name
+    if args.prompt:
+        server_obs_fields["prompt"] = args.prompt
+    if args.dataset_repo_id:
+        server_obs_fields["dataset_repo_id"] = args.dataset_repo_id
+    if args.stats_json_path:
+        server_obs_fields["stats_json_path"] = args.stats_json_path
+
+    def get_observation() -> dict:
+        obs = robot.get_observation()
+        obs.update(server_obs_fields)
+        return obs
+
     rtc_config = {
         "enabled": args.rtc,
         "execution_horizon": args.execution_horizon,
@@ -408,7 +440,7 @@ def main(args: Args) -> None:
 
     manager = RTCInferenceManager(
         policy=policy,
-        get_observation_fn=robot.get_observation,
+        get_observation_fn=get_observation,
         action_horizon=args.action_horizon,
         refill_threshold=args.refill_threshold,
         rtc_enabled=args.rtc,
@@ -426,6 +458,8 @@ def main(args: Args) -> None:
     logger.info("  Duration: %.1fs", args.duration)
 
     manager.start()
+
+    timing_log.clear()
 
     action_interval = 1.0 / args.control_hz
     t0 = time.monotonic()
@@ -492,7 +526,8 @@ def main(args: Args) -> None:
     logger.info("  Actions missed (empty queue): %d", actions_missed)
     logger.info("  Hit rate: %.1f%%", hit_rate)
     logger.info("  Effective Hz: %.1f", actions_executed / elapsed)
-    logger.info("  Inferences: %d", manager._inference_count)
+    logger.info("  Cold start inference: %.1fms (excluded from stats)", manager._cold_start_time * 1000)
+    logger.info("  Inferences (excl. cold start): %d", manager._inference_count)
     if manager._inference_count > 0:
         avg_infer_ms = (manager._total_inference_time / manager._inference_count) * 1000
         logger.info("  Avg inference time: %.1fms", avg_infer_ms)

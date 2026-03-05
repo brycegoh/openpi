@@ -91,6 +91,9 @@ image = (
         ),
         context_dir=str(project_root),
     )
+    .run_commands(
+        "git checkout 436e75bfcc2f070281a559dbfbf1cb61af297d8d"
+    )
     .uv_pip_install("fastapi", "websockets")
     .env({"PATH": "/.venv/bin:$PATH"})
 )
