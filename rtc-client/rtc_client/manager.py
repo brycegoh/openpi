@@ -293,15 +293,18 @@ class RTCInferenceManager:
                 continue
 
             try:
-                self._run_inference()
-                if not self._first_inference_done.is_set():
+                success = self._run_inference()
+                if success and not self._first_inference_done.is_set():
                     self._first_inference_done.set()
             except Exception:
                 logger.exception("Error in inference loop")
                 time.sleep(0.1)
 
-    def _run_inference(self) -> None:
-        """Execute one inference call and update the action queue."""
+    def _run_inference(self) -> bool:
+        """Execute one inference call and update the action queue.
+
+        Returns True if actions were successfully received and enqueued.
+        """
         index_before = self._action_queue.get_index()
         start_time = time.monotonic()
 
@@ -333,7 +336,7 @@ class RTCInferenceManager:
 
         if actions is None:
             logger.error("No actions returned from policy")
-            return
+            return False
 
         if actions.ndim == 1:
             actions = actions[np.newaxis, :]
@@ -364,6 +367,7 @@ class RTCInferenceManager:
             consumed,
             self._action_queue.remaining(),
         )
+        return True
 
 
 class InterpolatedActionWrapper:
