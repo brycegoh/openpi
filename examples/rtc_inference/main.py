@@ -382,7 +382,7 @@ def plot_timeline(
 
 
 def main(args: Args) -> None:
-    from openpi_client.rtc_client import RTCInferenceManager
+    from rtc_client import RTCInferenceManager
 
     timing_log = TimingLog()
     robot = MockRobot(state_dim=args.action_dim, num_cameras=2)
@@ -395,7 +395,7 @@ def main(args: Args) -> None:
             latency_ms=args.mock_latency_ms,
         )
     else:
-        from openpi_client import websocket_client_policy as _wcp
+        from rtc_client import websocket_policy as _wcp
 
         if args.modal_app_name:
             ws_url = get_modal_endpoint_url(args.modal_app_name, args.modal_function_name)

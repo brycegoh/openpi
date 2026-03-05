@@ -27,20 +27,11 @@ import threading
 from typing import Callable, Dict, Optional
 
 import numpy as np
-import abc
-from typing import Dict
 
-from openpi_client import image_tools as _image_tools
+from rtc_client import image_tools as _image_tools
+from rtc_client.base_policy import BasePolicy
 
 logger = logging.getLogger(__name__)
-class BasePolicy(abc.ABC):
-    @abc.abstractmethod
-    def infer(self, obs: Dict) -> Dict:
-        """Infer actions from observations."""
-
-    def reset(self) -> None:
-        """Reset the policy to its initial state."""
-        pass
 
 
 class RTCActionQueue:
@@ -344,7 +335,6 @@ class RTCInferenceManager:
         if raw_actions is not None and raw_actions.ndim == 1:
             raw_actions = raw_actions[np.newaxis, :]
 
-        # Calculate how many actions were consumed during this inference call
         index_after = self._action_queue.get_index()
         consumed = max(0, index_after - index_before)
 

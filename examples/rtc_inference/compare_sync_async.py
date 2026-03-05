@@ -174,7 +174,7 @@ def run_async_rtc_mode(
 
     Returns (action_log, t0).
     """
-    from openpi_client.rtc_client import RTCInferenceManager
+    from rtc_client import RTCInferenceManager
 
     action_log: list[np.ndarray] = []
     action_interval = 1.0 / control_hz
@@ -406,7 +406,7 @@ def main(args: Args) -> None:
             latency_ms=args.mock_latency_ms,
         )
     else:
-        from openpi_client import websocket_client_policy as _wcp
+        from rtc_client import websocket_policy as _wcp
 
         if args.modal_app_name:
             ws_url = get_modal_endpoint_url(args.modal_app_name, args.modal_function_name)
