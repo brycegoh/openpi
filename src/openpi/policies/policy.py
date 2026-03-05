@@ -131,7 +131,7 @@ class Policy(BasePolicy):
         }
         model_time = time.monotonic() - start_time
         if self._is_pytorch_model:
-            raw_actions_np = np.asarray(raw_actions[0, ...].detach().cpu())
+            raw_actions_np = np.asarray(raw_actions[0, ...].detach().cpu()).copy()
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...].detach().cpu()), outputs)
         else:
             raw_actions_np = np.asarray(raw_actions[0, ...])

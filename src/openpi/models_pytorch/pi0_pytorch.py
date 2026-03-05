@@ -532,7 +532,7 @@ class PI0Pytorch(nn.Module):
 
         weights = get_prefix_weights(
             start=0,
-            end=rtc_config.execution_horizon,
+            end=min(prev_len, rtc_config.execution_horizon),
             total=self.config.action_horizon,
             schedule=rtc_config.prefix_attention_schedule,
             device=device,
