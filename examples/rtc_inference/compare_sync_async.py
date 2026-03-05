@@ -27,11 +27,15 @@ Usage (direct WebSocket server):
 import dataclasses
 import logging
 import math
+import sys
 import time
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import tyro
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "rtc-client"))
 
 from main import (
     MockRobot,

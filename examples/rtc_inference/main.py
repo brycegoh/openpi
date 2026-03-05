@@ -30,12 +30,16 @@ Usage (RTC disabled, simple sequential chunking):
 
 import dataclasses
 import logging
+import sys
 import threading
 import time
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import tyro
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "rtc-client"))
 
 logger = logging.getLogger(__name__)
 
