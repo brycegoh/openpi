@@ -1,4 +1,4 @@
-"""Example: Continuous RTC inference with a mock robot.
+"""Example: Continuous RTC inference with a mock robot and timing visualization.
 
 Demonstrates the RTCInferenceManager that asynchronously fetches action chunks
 from a policy server while a mock robot continuously executes actions.
@@ -11,19 +11,28 @@ The key idea is threshold-based pre-fetching: when the action queue drops below
 For RTC mode, the leftover actions from the previous chunk are sent to the
 server so it can use inpainting to maintain temporal consistency across chunks.
 
-Usage (connect to a running policy server):
+After the run, a timing dot plot is generated showing when actions were executed,
+when inference was called, and when inference responses were received. Statistics
+on idle time and overlap (time saved vs synchronous inference) are printed.
+
+Usage (connect to a deployed Modal endpoint by app name):
+    python main.py --modal-app-name openpi-policy-server-rtc-1 --action-horizon 50
+
+Usage (connect to a running policy server by URL):
     python main.py --host ws://your-server-url/ws --action-horizon 50
 
 Usage (with a mock policy for local testing without a server):
     python main.py --use-mock-policy --action-horizon 50
 
 Usage (RTC disabled, simple sequential chunking):
-    python main.py --host ws://your-server-url/ws --no-rtc
+    python main.py --modal-app-name openpi-policy-server-rtc-1 --no-rtc
 """
 
 import dataclasses
 import logging
+import threading
 import time
+from typing import Optional
 
 import numpy as np
 import tyro
@@ -90,10 +99,74 @@ class MockPolicy:
 
 
 @dataclasses.dataclass
+class TimingEvent:
+    """A single timestamped event for the timing visualization."""
+    kind: str  # "action_executed", "idle", "inference_start", "inference_end"
+    timestamp: float  # time.monotonic() value
+
+
+class TimingLog:
+    """Thread-safe container for timing events recorded from multiple threads."""
+
+    def __init__(self):
+        self._events: list[TimingEvent] = []
+        self._lock = threading.Lock()
+
+    def record(self, kind: str) -> None:
+        ev = TimingEvent(kind=kind, timestamp=time.monotonic())
+        with self._lock:
+            self._events.append(ev)
+
+    @property
+    def events(self) -> list[TimingEvent]:
+        with self._lock:
+            return list(self._events)
+
+
+class InstrumentedPolicy:
+    """Wraps any policy to record inference_start / inference_end timing events."""
+
+    def __init__(self, inner_policy, timing_log: TimingLog):
+        self._inner = inner_policy
+        self._timing = timing_log
+
+    def infer(self, obs: dict) -> dict:
+        self._timing.record("inference_start")
+        result = self._inner.infer(obs)
+        self._timing.record("inference_end")
+        return result
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def get_modal_endpoint_url(app_name: str, function_name: str = "endpoint") -> str:
+    """Fetch the WebSocket URL from a deployed Modal app."""
+    import modal
+
+    logger.info("Fetching endpoint URL from Modal app '%s' function '%s'...", app_name, function_name)
+    try:
+        func = modal.Function.from_name(app_name, function_name)
+        endpoint_url = func.get_web_url()
+    except Exception as e:
+        logger.error("Failed to fetch Modal endpoint URL: %s", e)
+        logger.error("Make sure the app '%s' is deployed. Run: modal deploy modal_scripts/modal_serve_policy.py", app_name)
+        raise
+
+    ws_url = endpoint_url.replace("https://", "wss://").replace("http://", "ws://")
+    if not ws_url.endswith("/ws"):
+        ws_url = ws_url.rstrip("/") + "/ws"
+    logger.info("Resolved endpoint URL: %s", ws_url)
+    return ws_url
+
+
+@dataclasses.dataclass
 class Args:
     """Arguments for the RTC inference example."""
 
-    # Server connection
+    # Server connection — provide modal_app_name OR host (modal takes precedence)
+    modal_app_name: str | None = None
+    modal_function_name: str = "endpoint"
     host: str = "0.0.0.0"
     port: int | None = 8000
     api_key: str | None = None
@@ -117,31 +190,214 @@ class Args:
     # Run duration
     duration: float = 30.0
 
+    # Output
+    save_plot: str = "timing_plot.png"
+
     # Logging
     verbose: bool = False
+
+
+def compute_stats(
+    events: list[TimingEvent],
+    t0: float,
+    action_interval: float,
+) -> dict:
+    """Derive idle time and overlap statistics from recorded timing events.
+
+    Returns a dict with:
+        idle_time_s        – total seconds the robot had no action to execute
+        overlap_time_s     – total seconds where inference was in-flight AND
+                             actions were being executed concurrently
+        total_inference_s  – sum of all inference durations
+        sync_duration_s    – hypothetical duration if inference blocked execution
+        async_duration_s   – actual wall-clock duration
+        time_saved_s       – sync_duration_s - async_duration_s
+        time_saved_pct     – percentage of sync duration saved
+    """
+    action_times = []
+    idle_times = []
+    inference_intervals: list[tuple[float, float]] = []
+
+    pending_start: Optional[float] = None
+    for ev in sorted(events, key=lambda e: e.timestamp):
+        t = ev.timestamp - t0
+        if ev.kind == "action_executed":
+            action_times.append(t)
+        elif ev.kind == "idle":
+            idle_times.append(t)
+        elif ev.kind == "inference_start":
+            pending_start = t
+        elif ev.kind == "inference_end":
+            if pending_start is not None:
+                inference_intervals.append((pending_start, t))
+                pending_start = None
+
+    idle_time_s = len(idle_times) * action_interval
+
+    # Overlap: for each inference interval, count how many action ticks fall inside it
+    overlap_time_s = 0.0
+    for inf_start, inf_end in inference_intervals:
+        for at in action_times:
+            if inf_start <= at <= inf_end:
+                overlap_time_s += action_interval
+
+    total_inference_s = sum(end - start for start, end in inference_intervals)
+
+    async_duration_s = max(
+        (ev.timestamp - t0 for ev in events),
+        default=0.0,
+    )
+
+    # In a synchronous model, each inference blocks execution entirely, so
+    # the total time = action execution time + total inference time (no overlap).
+    action_execution_s = len(action_times) * action_interval
+    sync_duration_s = action_execution_s + total_inference_s
+
+    time_saved_s = sync_duration_s - async_duration_s
+    time_saved_pct = (time_saved_s / sync_duration_s * 100) if sync_duration_s > 0 else 0.0
+
+    return {
+        "idle_time_s": idle_time_s,
+        "overlap_time_s": overlap_time_s,
+        "total_inference_s": total_inference_s,
+        "sync_duration_s": sync_duration_s,
+        "async_duration_s": async_duration_s,
+        "time_saved_s": time_saved_s,
+        "time_saved_pct": time_saved_pct,
+        "num_inferences": len(inference_intervals),
+        "num_actions": len(action_times),
+        "num_idles": len(idle_times),
+    }
+
+
+def plot_timeline(
+    events: list[TimingEvent],
+    t0: float,
+    stats: dict,
+    save_path: str,
+) -> None:
+    """Generate a dot-plot timeline of action execution, inference calls, and idle periods."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    action_ts = []
+    idle_ts = []
+    inf_start_ts = []
+    inf_end_ts = []
+    inference_intervals: list[tuple[float, float]] = []
+
+    pending_start: Optional[float] = None
+    for ev in sorted(events, key=lambda e: e.timestamp):
+        t = ev.timestamp - t0
+        if ev.kind == "action_executed":
+            action_ts.append(t)
+        elif ev.kind == "idle":
+            idle_ts.append(t)
+        elif ev.kind == "inference_start":
+            inf_start_ts.append(t)
+            pending_start = t
+        elif ev.kind == "inference_end":
+            inf_end_ts.append(t)
+            if pending_start is not None:
+                inference_intervals.append((pending_start, t))
+                pending_start = None
+
+    fig, ax = plt.subplots(figsize=(16, 4))
+
+    row_labels = ["Action Executed", "Inference Called", "Inference Received"]
+    row_y = {label: i for i, label in enumerate(row_labels)}
+
+    # Actions
+    if action_ts:
+        ax.scatter(action_ts, [row_y["Action Executed"]] * len(action_ts),
+                   color="#2196F3", s=8, alpha=0.7, zorder=3, label="Action Executed")
+
+    # Idle ticks – shown as red dots on the action row
+    if idle_ts:
+        ax.scatter(idle_ts, [row_y["Action Executed"]] * len(idle_ts),
+                   color="#F44336", s=8, alpha=0.7, marker="x", zorder=3, label="Idle (no action)")
+
+    # Inference start
+    if inf_start_ts:
+        ax.scatter(inf_start_ts, [row_y["Inference Called"]] * len(inf_start_ts),
+                   color="#4CAF50", s=30, alpha=0.9, zorder=3, label="Inference Called")
+
+    # Inference end
+    if inf_end_ts:
+        ax.scatter(inf_end_ts, [row_y["Inference Received"]] * len(inf_end_ts),
+                   color="#FF9800", s=30, alpha=0.9, zorder=3, label="Inference Received")
+
+    # Horizontal bars connecting inference start->end (spanning the two rows)
+    for start, end in inference_intervals:
+        ax.plot([start, end], [row_y["Inference Called"], row_y["Inference Received"]],
+                color="#9E9E9E", linewidth=1.5, alpha=0.5, zorder=2)
+
+    # Shade idle regions on the action row
+    if idle_ts and len(idle_ts) >= 2:
+        idle_sorted = sorted(idle_ts)
+        gap_threshold = (idle_sorted[1] - idle_sorted[0]) * 3 if len(idle_sorted) > 1 else 0.1
+        region_start = idle_sorted[0]
+        prev = idle_sorted[0]
+        for t in idle_sorted[1:]:
+            if t - prev > gap_threshold:
+                ax.axvspan(region_start, prev, ymin=0, ymax=0.4, color="#F44336", alpha=0.12)
+                region_start = t
+            prev = t
+        ax.axvspan(region_start, prev, ymin=0, ymax=0.4, color="#F44336", alpha=0.12)
+
+    ax.set_yticks(list(range(len(row_labels))))
+    ax.set_yticklabels(row_labels)
+    ax.set_xlabel("Time (s)")
+    ax.set_title("RTC Inference Timeline")
+    ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
+    ax.grid(axis="x", alpha=0.3)
+    ax.set_xlim(left=0)
+
+    # Stats text box
+    stats_text = (
+        f"Idle: {stats['idle_time_s']:.2f}s  |  "
+        f"Overlap: {stats['overlap_time_s']:.2f}s  |  "
+        f"Avg inference: {stats['total_inference_s'] / max(stats['num_inferences'], 1) * 1000:.0f}ms  |  "
+        f"Time saved vs sync: {stats['time_saved_s']:.2f}s ({stats['time_saved_pct']:.1f}%)"
+    )
+    fig.text(0.5, -0.02, stats_text, ha="center", fontsize=9, style="italic")
+
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    logger.info("Saved timing plot to %s", save_path)
+    plt.close(fig)
 
 
 def main(args: Args) -> None:
     from openpi_client.rtc_client import RTCInferenceManager
 
+    timing_log = TimingLog()
     robot = MockRobot(state_dim=args.action_dim, num_cameras=2)
 
     if args.use_mock_policy:
         logger.info("Using mock policy (latency=%.0fms)", args.mock_latency_ms)
-        policy = MockPolicy(
+        raw_policy = MockPolicy(
             action_horizon=args.action_horizon,
             action_dim=args.action_dim,
             latency_ms=args.mock_latency_ms,
         )
     else:
         from openpi_client import websocket_client_policy as _wcp
-        logger.info("Connecting to server at %s:%s", args.host, args.port)
-        policy = _wcp.WebsocketClientPolicy(
-            host=args.host,
-            port=args.port,
-            api_key=args.api_key,
-        )
-        logger.info("Connected. Server metadata: %s", policy.get_server_metadata())
+
+        if args.modal_app_name:
+            ws_url = get_modal_endpoint_url(args.modal_app_name, args.modal_function_name)
+            raw_policy = _wcp.WebsocketClientPolicy(host=ws_url, api_key=args.api_key)
+        else:
+            logger.info("Connecting to server at %s:%s", args.host, args.port)
+            raw_policy = _wcp.WebsocketClientPolicy(
+                host=args.host,
+                port=args.port,
+                api_key=args.api_key,
+            )
+        logger.info("Connected. Server metadata: %s", raw_policy.get_server_metadata())
+
+    policy = InstrumentedPolicy(raw_policy, timing_log)
 
     rtc_config = {
         "enabled": args.rtc,
@@ -172,6 +428,7 @@ def main(args: Args) -> None:
     manager.start()
 
     action_interval = 1.0 / args.control_hz
+    t0 = time.monotonic()
     start_time = time.time()
     actions_executed = 0
     actions_missed = 0
@@ -186,8 +443,10 @@ def main(args: Args) -> None:
             if action is not None:
                 robot.execute_action(action)
                 actions_executed += 1
+                timing_log.record("action_executed")
             else:
                 actions_missed += 1
+                timing_log.record("idle")
 
             # Periodic status report
             now = time.time()
@@ -221,6 +480,9 @@ def main(args: Args) -> None:
     total_steps = actions_executed + actions_missed
     hit_rate = actions_executed / max(total_steps, 1) * 100
 
+    # --- Timing statistics ---
+    stats = compute_stats(timing_log.events, t0, action_interval)
+
     logger.info("=" * 60)
     logger.info("Run Summary")
     logger.info("=" * 60)
@@ -234,7 +496,19 @@ def main(args: Args) -> None:
     if manager._inference_count > 0:
         avg_infer_ms = (manager._total_inference_time / manager._inference_count) * 1000
         logger.info("  Avg inference time: %.1fms", avg_infer_ms)
+    logger.info("-" * 60)
+    logger.info("Timing Analysis (async vs sync)")
+    logger.info("-" * 60)
+    logger.info("  Idle time (no action available): %.3fs", stats["idle_time_s"])
+    logger.info("  Overlap time (inference during execution): %.3fs", stats["overlap_time_s"])
+    logger.info("  Total inference time: %.3fs", stats["total_inference_s"])
+    logger.info("  Hypothetical sync duration: %.3fs", stats["sync_duration_s"])
+    logger.info("  Actual async duration: %.3fs", stats["async_duration_s"])
+    logger.info("  Time saved by async: %.3fs (%.1f%%)", stats["time_saved_s"], stats["time_saved_pct"])
     logger.info("=" * 60)
+
+    # --- Plot ---
+    plot_timeline(timing_log.events, t0, stats, args.save_plot)
 
 
 if __name__ == "__main__":

@@ -79,10 +79,7 @@ from pathlib import Path
 # Note: Specific imports are done inside the function to avoid import issues with Modal
 
 # Get the project root directory (parent of scripts/)
-project_root = Path(__file__).parent.parent.parent
-
-# Local paths for openpi override
-OPENPI_OVERRIDE_DIR = project_root / "modal_scripts/lerobot_utils/openpi_override"
+project_root = Path(__file__).parent.parent
 
 # Create Modal image from the existing serve_policy.Dockerfile
 # This uses uv.lock for dependency management, ensuring consistency with local development
@@ -90,21 +87,15 @@ print(project_root)
 image = (
     modal.Image.from_dockerfile(
         path=str(
-            project_root / "modal_scripts/lerobot_utils/v21_openpi.Dockerfile"
+            project_root / "modal_scripts/v21_openpi.Dockerfile"
         ),
         context_dir=str(project_root),
     )
     .uv_pip_install("fastapi", "websockets")
     .env({"PATH": "/.venv/bin:$PATH"})
-    .add_local_python_source(
-        "msgpack_numpy",
-    )
-    # Add openpi_override to override installed openpi config
-    .add_local_dir(str(OPENPI_OVERRIDE_DIR), "/app/openpi_override")
 )
-
 app = modal.App(
-    "openpi-policy-server-3",
+    "openpi-policy-server-rtc-1",
     image=image,
 )
 
@@ -140,14 +131,6 @@ def endpoint():
     from pathlib import Path
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect
     import openpi_client.msgpack_numpy as msgpack_numpy
-
-    # Override openpi.training.config with our custom config before importing
-    spec = importlib.util.spec_from_file_location(
-        "openpi.training.config", "/app/openpi_override/config.py"
-    )
-    _config_module = importlib.util.module_from_spec(spec)
-    sys.modules["openpi.training.config"] = _config_module
-    spec.loader.exec_module(_config_module)
 
     from openpi.policies import policy_config as _policy_config
     from openpi.training import config as _config

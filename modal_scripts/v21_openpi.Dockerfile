@@ -44,7 +44,8 @@ ENV PATH="/.venv/bin:$PATH"
 RUN uv venv --python 3.11.9 $UV_PROJECT_ENVIRONMENT
 
 # Clone openpi repository
-RUN git clone https://github.com/Physical-Intelligence/openpi.git .
+RUN git clone https://github.com/brycegoh/openpi.git .
+RUN git checkout feat/rtc-implementation
 
 # Install openpi and its dependencies using the lockfile
 RUN GIT_LFS_SKIP_SMUDGE=1 uv sync
@@ -68,5 +69,7 @@ RUN uv pip install huggingface_hub hf_transfer pandas pyarrow tqdm
 
 # Set HF transfer for faster downloads
 ENV HF_HUB_ENABLE_HF_TRANSFER=1
+
+RUN git checkout 915f1cd287571d71b5fa58d665e71724c35bb7df
 
 WORKDIR /app
