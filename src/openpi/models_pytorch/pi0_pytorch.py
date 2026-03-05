@@ -572,16 +572,26 @@ class PI0Pytorch(nn.Module):
                     retain_graph=False,
                 )[0]
 
-            # Guidance weight adapted for pi0 convention (time: 1→0).
-            # Convert to kinetix convention: tau = 1 - time (tau: 0→1).
+            # --- Guidance weight computation ---
+            # Adapted for pi0 convention (time: 1→0); convert to kinetix tau = 1 - time.
             # See https://github.com/huggingface/lerobot/issues/2511
+            #
+            # Original RTC paper (ΠGDM) uses sigma_d=1 implicitly:
+            #   r_tau^2 = (1-tau)^2 / ((1-tau)^2 + tau^2)
+            # Soare optimization generalizes with sigma_d (prior data std dev):
+            #   r_tau^2 = (1-tau)^2 * sigma_d^2 / ((1-tau)^2 + sigma_d^2 * tau^2)
+            # Setting sigma_d < 1 (e.g. 0.2) increases guidance strength for smoother
+            # chunk transitions. sigma_d=1.0 recovers the original RTC paper formula.
+            # Ref: https://alexander-soare.github.io/robotics/2025/08/05/smooth-as-butter-robot-policies.html
             t_val = time.item()
             tau = 1.0 - t_val
+            sigma_d_sq = rtc_config.sigma_d ** 2
             sq_one_minus_tau = (1.0 - tau) ** 2  # = time^2
-            inv_r2 = (sq_one_minus_tau + tau ** 2) / max(sq_one_minus_tau, 1e-8)
+            inv_r2 = (sq_one_minus_tau + tau ** 2 * sigma_d_sq) / max(sq_one_minus_tau * sigma_d_sq, 1e-8)
             c = (1.0 - tau) / max(tau, 1e-8)  # = time / (1 - time)
-            c = min(c, rtc_config.max_guidance_weight)
-            guidance_weight = min(c * inv_r2, rtc_config.max_guidance_weight)
+            # Original RTC paper uses beta=5. Soare recommends beta=num_steps.
+            beta = rtc_config.max_guidance_weight if rtc_config.max_guidance_weight is not None else num_steps
+            guidance_weight = min(c * inv_r2, beta)
 
             # Subtraction because pi0 Euler step uses negative dt (time goes 1→0).
             # With dt<0: x' = x + dt*(v - g*correction) = x - |dt|*v + |dt|*g*correction

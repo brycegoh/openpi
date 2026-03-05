@@ -221,7 +221,8 @@ class Args:
     rtc: bool = True
     execution_horizon: int = 10
     prefix_attention_schedule: str = "LINEAR"
-    max_guidance_weight: float = 5.0
+    max_guidance_weight: float = -1.0  # -1 = auto (num_steps). Original RTC paper: 5.0
+    sigma_d: float = 0.2  # Prior data std dev. Original RTC paper: 1.0 (Soare optimization: 0.2)
     refill_threshold: float = 0.50
 
     # Run duration
@@ -461,7 +462,8 @@ def main(args: Args) -> None:
         "enabled": args.rtc,
         "execution_horizon": args.execution_horizon,
         "prefix_attention_schedule": args.prefix_attention_schedule,
-        "max_guidance_weight": args.max_guidance_weight,
+        "max_guidance_weight": args.max_guidance_weight if args.max_guidance_weight >= 0 else None,
+        "sigma_d": args.sigma_d,
     }
 
     manager = RTCInferenceManager(

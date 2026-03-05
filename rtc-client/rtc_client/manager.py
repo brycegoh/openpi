@@ -148,7 +148,10 @@ class RTCInferenceManager:
             - enabled (bool): Enable RTC on server side.
             - execution_horizon (int): Number of overlap timesteps for inpainting.
             - prefix_attention_schedule (str): Weight schedule ("LINEAR", "EXP", etc.).
-            - max_guidance_weight (float): Max guidance weight for VJP correction.
+            - max_guidance_weight (float | None): Clipping parameter (beta) for guidance
+              weight. None = auto (num_steps). Original RTC paper uses 5.0.
+            - sigma_d (float): Prior data std dev for guidance. Original RTC paper
+              assumes 1.0. Soare optimization uses < 1 (e.g. 0.2) for smoother transitions.
     """
 
     def __init__(
@@ -170,7 +173,10 @@ class RTCInferenceManager:
             "enabled": True,
             "execution_horizon": 10,
             "prefix_attention_schedule": "LINEAR",
-            "max_guidance_weight": 5.0,
+            # Soare optimization defaults: beta=num_steps (None=auto), sigma_d=0.2
+            # Set max_guidance_weight=5.0 and sigma_d=1.0 for original RTC paper behavior.
+            "max_guidance_weight": None,
+            "sigma_d": 0.2,
         }
 
         self._action_queue = RTCActionQueue()

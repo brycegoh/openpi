@@ -28,7 +28,14 @@ class RTCAttentionSchedule(str, enum.Enum):
 class RTCConfig:
     enabled: bool = True
     prefix_attention_schedule: RTCAttentionSchedule = RTCAttentionSchedule.LINEAR
-    max_guidance_weight: float = 5.0
+    # Clipping parameter (beta) for the ΠGDM guidance weight. Original RTC paper uses 5.0.
+    # Soare optimization: set beta = num_steps for stability. None = auto (num_steps).
+    max_guidance_weight: float | None = None
+    # Prior data standard deviation. Original RTC paper assumes sigma_d=1.0.
+    # Soare optimization: sigma_d < 1 (e.g. 0.2) strengthens guidance for smoother
+    # chunk transitions, since conditioned action distributions are narrower.
+    # Ref: https://alexander-soare.github.io/robotics/2025/08/05/smooth-as-butter-robot-policies.html
+    sigma_d: float = 0.2
     # Minimum execution horizon (s_min). The effective execution horizon is
     # s = max(execution_horizon, inference_delay), and the overlap region end
     # is computed as H - s.  This prevents the soft blending region from

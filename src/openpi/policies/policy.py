@@ -109,7 +109,8 @@ class Policy(BasePolicy):
                 prefix_attention_schedule=RTCAttentionSchedule(
                     rtc_config_dict.get("prefix_attention_schedule", "LINEAR")
                 ),
-                max_guidance_weight=rtc_config_dict.get("max_guidance_weight", 5.0),
+                max_guidance_weight=rtc_config_dict.get("max_guidance_weight", None),
+                sigma_d=rtc_config_dict.get("sigma_d", 0.2),
                 execution_horizon=rtc_config_dict.get("execution_horizon", 10),
                 inference_delay=rtc_config_dict.get("inference_delay", 0),
             )
