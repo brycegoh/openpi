@@ -29,21 +29,33 @@ def get_safe_dtype(target_dtype, device_type):
 def create_sinusoidal_pos_embedding(
     time: torch.tensor, dimension: int, min_period: float, max_period: float, device="cpu"
 ) -> Tensor:
-    """Computes sine-cosine positional embedding vectors for scalar positions."""
+    """Computes sine-cosine positional embedding vectors for scalar positions.
+
+    Accepts time tensors of shape (B,) or (B, T) for per-token timesteps (TTAC).
+    Returns (B, D) for 1D input or (B, T, D) for 2D input.
+    """
     if dimension % 2 != 0:
         raise ValueError(f"dimension ({dimension}) must be divisible by 2")
 
-    if time.ndim != 1:
-        raise ValueError("The time tensor is expected to be of shape `(batch_size, )`.")
+    reshape_back = None
+    if time.ndim == 2:
+        B, T = time.shape
+        reshape_back = (B, T, dimension)
+        time = time.reshape(-1)
+    elif time.ndim != 1:
+        raise ValueError(f"Expected 1D or 2D time tensor, got {time.ndim}D.")
 
     dtype = get_safe_dtype(torch.float64, device.type)
     fraction = torch.linspace(0.0, 1.0, dimension // 2, dtype=dtype, device=device)
     period = min_period * (max_period / min_period) ** fraction
 
-    # Compute the outer product
     scaling_factor = 1.0 / period * 2 * math.pi
     sin_input = scaling_factor[None, :] * time[:, None]
-    return torch.cat([torch.sin(sin_input), torch.cos(sin_input)], dim=1)
+    result = torch.cat([torch.sin(sin_input), torch.cos(sin_input)], dim=1)
+
+    if reshape_back is not None:
+        result = result.reshape(reshape_back)
+    return result
 
 
 def sample_beta(alpha, beta, bsize, device):
@@ -277,7 +289,8 @@ class PI0Pytorch(nn.Module):
         action_emb = self._apply_checkpoint(action_proj_func, noisy_actions)
 
         if not self.pi05:
-            time_emb = time_emb[:, None, :].expand_as(action_emb)
+            if time_emb.ndim == 2:
+                time_emb = time_emb[:, None, :].expand_as(action_emb)
             action_time_emb = torch.cat([action_emb, time_emb], dim=2)
 
             # Apply MLP layers
@@ -327,12 +340,29 @@ class PI0Pytorch(nn.Module):
         if time is None:
             time = self.sample_time(actions.shape[0], actions.device)
 
-        time_expanded = time[:, None, None]
-        x_t = time_expanded * noise + (1 - time_expanded) * actions
-        u_t = noise - actions
+        ttac_config = getattr(self.config, "ttac_config", None)
+        postfix_mask = None
+
+        if ttac_config is not None and ttac_config.enabled and self.training:
+            from openpi.policies.ttac import apply_ttac_training, sample_ttac_delay
+
+            delay = sample_ttac_delay(ttac_config, actions.shape[0], actions.device)
+            time_tokens, postfix_mask = apply_ttac_training(time, delay, self.config.action_horizon)
+
+            time_expanded = time_tokens[:, :, None]
+            x_t = time_expanded * noise + (1 - time_expanded) * actions
+            u_t = noise - actions
+
+            time_for_embed = time_tokens
+        else:
+            time_expanded = time[:, None, None]
+            x_t = time_expanded * noise + (1 - time_expanded) * actions
+            u_t = noise - actions
+
+            time_for_embed = time
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
-        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time)
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time_for_embed)
         if (
             self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype
             == torch.bfloat16
@@ -346,10 +376,8 @@ class PI0Pytorch(nn.Module):
         att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
         position_ids = torch.cumsum(pad_masks, dim=1) - 1
 
-        # Prepare attention masks
         att_2d_masks_4d = self._prepare_attention_masks_4d(att_2d_masks)
 
-        # Apply gradient checkpointing if enabled
         def forward_func(prefix_embs, suffix_embs, att_2d_masks_4d, position_ids, adarms_cond):
             (_, suffix_out), _ = self.paligemma_with_expert.forward(
                 attention_mask=att_2d_masks_4d,
@@ -368,13 +396,19 @@ class PI0Pytorch(nn.Module):
         suffix_out = suffix_out[:, -self.config.action_horizon :]
         suffix_out = suffix_out.to(dtype=torch.float32)
 
-        # Apply gradient checkpointing to final action projection if enabled
         def action_out_proj_func(suffix_out):
             return self.action_out_proj(suffix_out)
 
         v_t = self._apply_checkpoint(action_out_proj_func, suffix_out)
 
-        return F.mse_loss(u_t, v_t, reduction="none")
+        losses = F.mse_loss(u_t, v_t, reduction="none")
+
+        if postfix_mask is not None:
+            from openpi.policies.ttac import masked_mean
+
+            return masked_mean(losses, postfix_mask)
+
+        return losses
 
     @torch.no_grad()
     def sample_actions(self, device, observation, noise=None, num_steps=10) -> Tensor:
@@ -601,3 +635,80 @@ class PI0Pytorch(nn.Module):
             time = time + dt_t
 
         return x_t.detach()
+
+    @torch.no_grad()
+    def sample_actions_ttac(
+        self,
+        device,
+        observation,
+        *,
+        noise=None,
+        num_steps=10,
+        prev_chunk_leftover=None,
+        inference_delay=0,
+    ) -> Tensor:
+        """Sample actions with Training-Time Action Conditioning (TTAC).
+
+        When prev_chunk_leftover is provided, prefix positions are replaced with
+        ground truth actions from the previous chunk and their timesteps are set
+        to 0.0 (fully denoised). This mirrors what the model learned during
+        TTAC training, where prefix tokens always appeared at t=0.
+
+        Falls back to standard sample_actions when no previous actions are available.
+        """
+        from openpi.policies.ttac import apply_ttac_inference
+
+        if prev_chunk_leftover is None or inference_delay <= 0:
+            return self.sample_actions(device, observation, noise=noise, num_steps=num_steps)
+
+        bsize = observation.state.shape[0]
+        if noise is None:
+            actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
+            noise = self.sample_noise(actions_shape, device)
+
+        prev_actions = prev_chunk_leftover.to(device=device, dtype=noise.dtype)
+        if prev_actions.ndim == 2:
+            prev_actions = prev_actions.unsqueeze(0)
+
+        images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=False)
+
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
+        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+
+        prefix_att_2d_masks_4d = self._prepare_attention_masks_4d(prefix_att_2d_masks)
+        self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"  # noqa: SLF001
+
+        _, past_key_values = self.paligemma_with_expert.forward(
+            attention_mask=prefix_att_2d_masks_4d,
+            position_ids=prefix_position_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, None],
+            use_cache=True,
+        )
+
+        dt = -1.0 / num_steps
+        dt_t = torch.tensor(dt, dtype=torch.float32, device=device)
+
+        x_t = noise
+        time = torch.tensor(1.0, dtype=torch.float32, device=device)
+
+        while time >= -dt_t / 2:
+            x_t_cond, time_tokens = apply_ttac_inference(
+                x_t, time.item(), inference_delay, prev_actions, self.config.action_horizon
+            )
+
+            v_t = self.denoise_step(
+                state,
+                prefix_pad_masks,
+                past_key_values,
+                x_t_cond,
+                time_tokens,
+            )
+
+            x_t = x_t_cond + dt_t * v_t
+            time += dt_t
+
+        d = min(inference_delay, prev_actions.shape[1], self.config.action_horizon)
+        x_t[:, :d] = prev_actions[:, :d]
+        return x_t
