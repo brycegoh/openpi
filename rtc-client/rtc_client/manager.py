@@ -168,6 +168,7 @@ class RTCInferenceManager:
         rtc_enabled: bool = True,
         rtc_config: Optional[Dict] = None,
         control_hz: float = 50.0,
+        interpolation_factor: float = 1.0,
     ):
         self._policy = policy
         self._get_observation = get_observation_fn
@@ -194,6 +195,7 @@ class RTCInferenceManager:
         self._latency_estimator = JKLatencyEstimator(
             control_hz=control_hz,
             action_horizon=action_horizon,
+            interpolation_factor=interpolation_factor,
         )
 
     @property
@@ -404,6 +406,7 @@ class InterpolatedActionWrapper:
             raise ValueError("factor must be >= 1.0")
         self._manager = manager
         self._factor = factor
+        manager._latency_estimator._interpolation_factor = factor
         self._buffer: List[np.ndarray] = []
         self._prev: Optional[np.ndarray] = None
         self._accumulator: float = 0.0

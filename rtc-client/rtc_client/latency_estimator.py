@@ -17,12 +17,17 @@ class JKLatencyEstimator:
     combining them to produce a conservative estimate that adapts to variance.
 
     The estimator takes wall-clock seconds as input and converts to action steps
-    at the output via ``ceil(estimate_seconds * control_hz)``, clamped to
-    ``action_horizon // 2`` per the RTC constraint (d <= H/2).
+    at the output via ``ceil(estimate_seconds * control_hz / interpolation_factor)``,
+    clamped to ``action_horizon // 2`` per the RTC constraint (d <= H/2).
+
+    When an ``InterpolatedActionWrapper`` stretches each raw action into multiple
+    control ticks, ``interpolation_factor`` corrects the conversion so that
+    ``estimate_steps`` reflects raw queue actions consumed, not control ticks.
 
     Args:
         control_hz: Control loop frequency for quantizing to action steps.
         action_horizon: Prediction horizon H (number of actions per chunk).
+        interpolation_factor: Ratio of control ticks per raw action (>= 1.0).
         alpha: Smoothing factor for mean (default 0.125 per RFC 6298).
         beta: Smoothing factor for deviation (default 0.25 per RFC 6298).
         k: Scaling factor for deviation in estimate.
@@ -32,12 +37,14 @@ class JKLatencyEstimator:
         self,
         control_hz: float,
         action_horizon: int,
+        interpolation_factor: float = 1.0,
         alpha: float = 0.125,
         beta: float = 0.25,
         k: float = 1.5,
     ):
         self._control_hz = control_hz
         self._action_horizon = action_horizon
+        self._interpolation_factor = interpolation_factor
         self.alpha = alpha
         self.beta = beta
         self.k = k
@@ -69,7 +76,7 @@ class JKLatencyEstimator:
         """Latency estimate quantized to action steps, clamped to action_horizon // 2."""
         if not self._initialized:
             return 0
-        raw = max(1, math.ceil(self.estimate_seconds * self._control_hz))
+        raw = max(1, math.ceil(self.estimate_seconds * self._control_hz / self._interpolation_factor))
         d_max = max(1, self._action_horizon // 2)
         return min(raw, d_max)
 
