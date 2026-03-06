@@ -18,6 +18,7 @@ OpenPI flow matching convention:
 
 import dataclasses
 import enum
+from collections.abc import Sequence
 
 import torch
 
@@ -44,6 +45,8 @@ class TTACConfig:
             raise ValueError(
                 f"max_delay ({self.max_delay}) must be >= min_delay ({self.min_delay})"
             )
+        if self.exp_decay <= 0:
+            raise ValueError(f"exp_decay must be positive, got {self.exp_decay}")
 
 
 def sample_ttac_delay(
@@ -54,27 +57,26 @@ def sample_ttac_delay(
     """Sample a delay per batch element.
 
     Returns:
-        Integer tensor of shape (batch_size,) with values in [min_delay, max_delay].
+        Long tensor of shape (batch_size,) with values in [min_delay, max_delay].
     """
-    if config.delay_distribution == TTACDelayDistribution.UNIFORM:
-        delays = torch.randint(
-            config.min_delay, config.max_delay + 1, (batch_size,), device=device
-        )
-    elif config.delay_distribution == TTACDelayDistribution.EXP:
-        num_options = config.max_delay - config.min_delay + 1
-        weights = torch.exp(
-            -config.exp_decay
-            * torch.arange(num_options, dtype=torch.float32, device=device)
-        )
-        weights = weights / weights.sum()
-        indices = torch.multinomial(
-            weights.unsqueeze(0).expand(batch_size, -1), num_samples=1
-        ).squeeze(1)
-        delays = indices + config.min_delay
-    else:
-        raise ValueError(f"Unknown delay distribution: {config.delay_distribution}")
+    if config.max_delay == config.min_delay:
+        return torch.full((batch_size,), config.min_delay, device=device, dtype=torch.long)
 
-    return delays
+    if config.delay_distribution == TTACDelayDistribution.UNIFORM:
+        return torch.randint(
+            config.min_delay, config.max_delay + 1, (batch_size,), device=device, dtype=torch.long
+        )
+
+    if config.delay_distribution == TTACDelayDistribution.EXP:
+        delay_values = torch.arange(
+            config.min_delay, config.max_delay + 1, device=device, dtype=torch.long
+        )
+        weights = torch.exp(-config.exp_decay * delay_values.to(dtype=torch.float32))
+        probs = weights / weights.sum()
+        samples = torch.multinomial(probs, batch_size, replacement=True)
+        return delay_values[samples]
+
+    raise ValueError(f"Unknown delay distribution: {config.delay_distribution}")
 
 
 def apply_ttac_training(
@@ -96,42 +98,48 @@ def apply_ttac_training(
         time_tokens: Per-token timesteps, shape (B, seq_len).
         postfix_mask: Boolean mask, True for postfix positions, shape (B, seq_len).
     """
-    batch_size = time.shape[0]
     device = time.device
-
-    indices = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1)
-    delay_expanded = delay.unsqueeze(1)
-    postfix_mask = indices >= delay_expanded
-
-    time_tokens = torch.where(
-        postfix_mask,
-        time.unsqueeze(1).expand(-1, seq_len),
-        torch.zeros(batch_size, seq_len, dtype=time.dtype, device=device),
-    )
-
+    delay = torch.clamp(delay, max=seq_len)
+    prefix_mask = torch.arange(seq_len, device=device)[None, :] < delay[:, None]
+    time_tokens = time[:, None].expand(-1, seq_len).clone()
+    time_tokens = time_tokens.masked_fill(prefix_mask, 0.0)
+    postfix_mask = ~prefix_mask
     return time_tokens, postfix_mask
 
 
 def masked_mean(
     losses: torch.Tensor,
-    mask: torch.Tensor,
+    mask: torch.Tensor | None,
+    reduce_dims: Sequence[int] | None = None,
 ) -> torch.Tensor:
     """Compute masked mean over losses, restricting to postfix positions.
 
     Args:
         losses: Loss tensor, shape (B, T, D) or (B, T).
         mask: Boolean mask, shape (B, T). True for positions to include.
+            If None, computes unmasked mean over reduce_dims (or all dims).
+        reduce_dims: Dimensions to reduce over. If None, reduces all dims.
 
     Returns:
-        Scalar mean of masked losses.
+        Mean of masked losses, reduced over the specified dimensions.
     """
-    if losses.ndim == 3:
+    if mask is None:
+        if reduce_dims is None:
+            return losses.mean()
+        return losses.mean(dim=reduce_dims)
+
+    if losses.ndim == 3 and mask.ndim == 2:
         mask_expanded = mask.unsqueeze(-1).expand_as(losses)
     else:
         mask_expanded = mask
 
-    masked_losses = losses * mask_expanded.float()
-    return masked_losses.sum() / mask_expanded.float().sum().clamp(min=1.0)
+    mask_f = mask_expanded.float()
+    masked_losses = losses * mask_f
+
+    if reduce_dims is None:
+        return masked_losses.sum() / mask_f.sum().clamp(min=1.0)
+
+    return masked_losses.sum(dim=reduce_dims) / mask_f.sum(dim=reduce_dims).clamp(min=1.0)
 
 
 def apply_ttac_inference(

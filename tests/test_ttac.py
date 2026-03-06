@@ -30,6 +30,12 @@ class TestTTACConfig:
         with pytest.raises(ValueError, match="max_delay .* must be >= min_delay"):
             TTACConfig(min_delay=5, max_delay=3)
 
+    def test_invalid_exp_decay(self):
+        with pytest.raises(ValueError, match="exp_decay must be positive"):
+            TTACConfig(exp_decay=0.0)
+        with pytest.raises(ValueError, match="exp_decay must be positive"):
+            TTACConfig(exp_decay=-1.0)
+
 
 class TestSampleDelay:
     def test_uniform_range(self):
@@ -46,10 +52,18 @@ class TestSampleDelay:
         assert delays.min() >= 0
         assert delays.max() <= 5
 
+    def test_exp_weights_by_absolute_delay(self):
+        """EXP distribution weights by absolute delay value, not relative index."""
+        cfg = TTACConfig(min_delay=2, max_delay=4, delay_distribution=TTACDelayDistribution.EXP, exp_decay=1.0)
+        delays = sample_ttac_delay(cfg, batch_size=5000, device=torch.device("cpu"))
+        counts = torch.bincount(delays, minlength=5)
+        assert counts[2] > counts[3] > counts[4]
+
     def test_single_value(self):
         cfg = TTACConfig(min_delay=3, max_delay=3)
         delays = sample_ttac_delay(cfg, batch_size=10, device=torch.device("cpu"))
         assert (delays == 3).all()
+        assert delays.dtype == torch.long
 
 
 class TestApplyTTACTraining:
@@ -97,6 +111,15 @@ class TestApplyTTACTraining:
         assert postfix_mask[0].tolist() == [False, False, False, False]
         assert (time_tokens[0] == 0.0).all()
 
+    def test_delay_exceeds_seq_len_is_clamped(self):
+        """Delay > seq_len should be clamped to seq_len (all prefix)."""
+        time = torch.tensor([0.5])
+        delay = torch.tensor([10])
+        time_tokens, postfix_mask = apply_ttac_training(time, delay, 4)
+
+        assert postfix_mask[0].tolist() == [False, False, False, False]
+        assert (time_tokens[0] == 0.0).all()
+
 
 class TestMaskedMean:
     def test_all_true(self):
@@ -116,6 +139,20 @@ class TestMaskedMean:
         mask = torch.zeros(1, 4, dtype=torch.bool)
         result = masked_mean(losses, mask)
         assert result.item() == pytest.approx(0.0)
+
+    def test_none_mask(self):
+        losses = torch.ones(2, 4, 3) * 3.0
+        result = masked_mean(losses, None)
+        assert result.item() == pytest.approx(3.0)
+
+    def test_reduce_dims(self):
+        losses = torch.ones(2, 4, 3)
+        mask = torch.ones(2, 4, dtype=torch.bool)
+        mask[0, :2] = False
+        result = masked_mean(losses, mask, reduce_dims=(1, 2))
+        assert result.shape == (2,)
+        assert result[0].item() == pytest.approx(1.0)
+        assert result[1].item() == pytest.approx(1.0)
 
 
 class TestApplyTTACInference:
