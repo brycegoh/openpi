@@ -400,6 +400,8 @@ def train_loop(config: _config.TrainConfig):
             paligemma_variant=getattr(config.model, "paligemma_variant", "gemma_2b"),
             action_expert_variant=getattr(config.model, "action_expert_variant", "gemma_300m"),
             pi05=getattr(config.model, "pi05", False),
+            rtc_config=getattr(config.model, "rtc_config", None),
+            ttac_config=getattr(config.model, "ttac_config", None),
         )
     else:
         model_cfg = config.model
@@ -407,6 +409,18 @@ def train_loop(config: _config.TrainConfig):
         object.__setattr__(model_cfg, "dtype", config.pytorch_training_precision)
 
     model = openpi.models_pytorch.pi0_pytorch.PI0Pytorch(model_cfg).to(device)
+
+    # Validate and log TTAC configuration
+    ttac_config = getattr(model_cfg, "ttac_config", None)
+    if ttac_config is not None and ttac_config.enabled:
+        if ttac_config.max_delay >= model_cfg.action_horizon:
+            raise ValueError(
+                f"TTAC max_delay ({ttac_config.max_delay}) must be < action_horizon ({model_cfg.action_horizon})"
+            )
+        logging.info(
+            f"TTAC enabled: delay=[{ttac_config.min_delay}, {ttac_config.max_delay}], "
+            f"distribution={ttac_config.delay_distribution.value}"
+        )
 
     if hasattr(model, "gradient_checkpointing_enable"):
         enable_gradient_checkpointing = True
@@ -498,6 +512,14 @@ def train_loop(config: _config.TrainConfig):
         )
         logging.info("EMA is not supported for PyTorch training")
         logging.info(f"Training precision: {model_cfg.dtype}")
+        ttac_cfg = getattr(model_cfg, "ttac_config", None)
+        if ttac_cfg is not None and ttac_cfg.enabled:
+            logging.info(
+                f"TTAC: enabled, delay=[{ttac_cfg.min_delay}, {ttac_cfg.max_delay}], "
+                f"distribution={ttac_cfg.delay_distribution.value}"
+            )
+        else:
+            logging.info("TTAC: disabled")
 
     # Training loop - iterate until we reach num_train_steps
     pbar = (

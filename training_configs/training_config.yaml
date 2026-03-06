@@ -19,10 +19,11 @@ git_repo: "https://github.com/brycegoh/openpi.git"
 git_branch: "v2.1"
 
 # --- Training Settings ---
+train_config_name: "pi05_tcr_ttac_pytorch"  # base config from src/openpi/training/config.py
 dataset_repo: "griffinlabs/B006_B016_cleaned_dataset"
 base_model_repo: "griffinlabs/pi05_pytorch_evaluated_base"
 base_model_repo_path: ""   # optional: subfolder within repo, e.g. "pi05_tcr_full_finetune_pytorch/pi05_1877ep/54000"
-exp_name: "pi05_B006_B016"
+exp_name: "pi05_B006_B016_ttac"
 batch_size: 384
 num_train_steps: 30000
 save_interval: 4747         # checkpoint every N steps
@@ -32,6 +33,15 @@ checkpoint_base_dir: "/workspace/checkpoints"
 action_horizon: 50
 wandb_enabled: true
 num_gpus: 4                  # nproc_per_node for torchrun
+
+# --- TTAC (Training-Time Action Conditioning) ---
+# Set enabled: false to disable TTAC and train normally.
+ttac:
+  enabled: true
+  min_delay: 0               # include delay=0 for first-chunk (no previous actions) case
+  max_delay: 25              # covers avg inference delay (~22 actions) with margin
+  delay_distribution: UNIFORM # UNIFORM or EXP
+  exp_decay: 1.0             # only used when delay_distribution=EXP
 
 # --- Optional ---
 stop_after_training: false   # auto-terminate pod when training finishes

@@ -11,6 +11,7 @@ import openpi.models.gemma as _gemma
 from openpi.shared import array_typing as at
 import openpi.shared.nnx_utils as nnx_utils
 from openpi.policies.rtc_processor import RTCConfig
+from openpi.policies.ttac import TTACConfig
 
 if TYPE_CHECKING:
     from openpi.models.pi0 import Pi0
@@ -34,6 +35,7 @@ class Pi0Config(_model.BaseModelConfig):
     discrete_state_input: bool = None  # type: ignore
 
     rtc_config: RTCConfig | None = None
+    ttac_config: TTACConfig | None = None
 
     def __post_init__(self):
         if self.max_token_len is None:

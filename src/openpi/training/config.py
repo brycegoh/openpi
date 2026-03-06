@@ -29,6 +29,7 @@ import openpi.training.misc.roboarena_config as roboarena_config
 import openpi.training.optimizer as _optimizer
 import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as _transforms
+from openpi.policies.ttac import TTACConfig
 
 ModelType: TypeAlias = _model.ModelType
 # Work around a tyro issue with using nnx.filterlib.Filter directly.
@@ -1334,6 +1335,35 @@ _CONFIGS = [
         exp_name="debug_pi05",
         wandb_enabled=False,
     ),
+    TrainConfig(
+        name="debug_ttac",
+        model=pi0_config.Pi0Config(
+            paligemma_variant="dummy",
+            action_expert_variant="dummy",
+            ttac_config=TTACConfig(enabled=True, min_delay=0, max_delay=3),
+        ),
+        data=FakeDataConfig(),
+        batch_size=2,
+        num_train_steps=10,
+        overwrite=True,
+        exp_name="debug_ttac",
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        name="debug_pi05_ttac",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="dummy",
+            action_expert_variant="dummy",
+            ttac_config=TTACConfig(enabled=True, min_delay=0, max_delay=3),
+        ),
+        data=FakeDataConfig(),
+        batch_size=2,
+        num_train_steps=10,
+        overwrite=True,
+        exp_name="debug_pi05_ttac",
+        wandb_enabled=False,
+    ),
     #
     # TCR (bi-arm, 3 cameras into model) configs.
     #
@@ -1485,6 +1515,85 @@ _CONFIGS = [
         ),
         pytorch_weight_path="/workspace/checkpoints/pi05_base_pytorch",
         # weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        num_train_steps=100_000,
+        batch_size=256,
+        log_interval=100,
+        save_interval=1000,
+        keep_period=1000,
+    ),
+    #
+    # TTAC (Training-Time Action Conditioning) configs.
+    #
+    # These configs enable TTAC for the PyTorch training pipeline. TTAC simulates
+    # inference delay at training time so the model learns to condition on a prefix
+    # of previously committed actions, eliminating the need for VJP-based correction
+    # at inference time. See: https://arxiv.org/abs/2512.05964
+    #
+    TrainConfig(
+        name="pi05_tcr_ttac_pytorch",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            ttac_config=TTACConfig(
+                enabled=True,
+                min_delay=0,
+                max_delay=6,
+            ),
+        ),
+        data=LeRobotTCRDataConfig(
+            repo_id="/workspace/dataset",
+            assets=AssetsConfig(),
+            default_prompt=None,
+            env_action_dim=14,
+            base_camera="top",
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+        pytorch_weight_path="/workspace/base_checkpoints/pi05_base_pytorch",
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        num_train_steps=30_000,
+        batch_size=256,
+        log_interval=100,
+        save_interval=1000,
+        keep_period=1000,
+    ),
+    TrainConfig(
+        name="pi05_tcr_4cam_ttac_pytorch",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            ttac_config=TTACConfig(
+                enabled=True,
+                min_delay=0,
+                max_delay=6,
+            ),
+        ),
+        data=LeRobotTCRDataConfig(
+            is_4_camera=True,
+            repo_id="/workspace/dataset",
+            assets=AssetsConfig(),
+            default_prompt=None,
+            env_action_dim=14,
+            base_camera="top",
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+        pytorch_weight_path="/workspace/checkpoints/pi05_base_pytorch",
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
             peak_lr=5e-5,
