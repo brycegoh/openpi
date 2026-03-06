@@ -114,6 +114,10 @@ def masked_mean(
 ) -> torch.Tensor:
     """Compute masked mean over losses, restricting to postfix positions.
 
+    Matches the kinetix reference: normalizes by the number of valid *positions*
+    (not elements), so for (B, T, D) losses with (B, T) mask, the denominator
+    counts valid (b, t) positions rather than valid (b, t, d) elements.
+
     Args:
         losses: Loss tensor, shape (B, T, D) or (B, T).
         mask: Boolean mask, shape (B, T). True for positions to include.
@@ -128,18 +132,22 @@ def masked_mean(
             return losses.mean()
         return losses.mean(dim=reduce_dims)
 
+    # Keep mask as (B, T) or (B, T, 1) — do NOT expand to (B, T, D) so the
+    # denominator counts positions, matching the kinetix reference:
+    #   loss_mask = ~mask[:, :, None]   # (B, T, 1)
+    #   sum(loss * loss_mask) / (sum(loss_mask) + eps)
     if losses.ndim == 3 and mask.ndim == 2:
-        mask_expanded = mask.unsqueeze(-1).expand_as(losses)
+        mask_for_loss = mask.unsqueeze(-1)  # (B, T, 1), broadcasts to (B, T, D)
     else:
-        mask_expanded = mask
+        mask_for_loss = mask
 
-    mask_f = mask_expanded.float()
+    mask_f = mask_for_loss.float()
     masked_losses = losses * mask_f
 
     if reduce_dims is None:
-        return masked_losses.sum() / mask_f.sum().clamp(min=1.0)
+        return masked_losses.sum() / mask_f.sum().clamp(min=1e-8)
 
-    return masked_losses.sum(dim=reduce_dims) / mask_f.sum(dim=reduce_dims).clamp(min=1.0)
+    return masked_losses.sum(dim=reduce_dims) / mask_f.sum(dim=reduce_dims).clamp(min=1e-8)
 
 
 def apply_ttac_inference(

@@ -126,13 +126,15 @@ class TestMaskedMean:
         losses = torch.ones(2, 4, 3)
         mask = torch.ones(2, 4, dtype=torch.bool)
         result = masked_mean(losses, mask)
-        assert result.item() == pytest.approx(1.0)
+        # 8 valid positions, each summing 3 elements = total 24, denom = 8 (positions)
+        assert result.item() == pytest.approx(3.0)
 
     def test_partial_mask(self):
         losses = torch.ones(1, 4, 2) * 2.0
         mask = torch.tensor([[False, False, True, True]])
         result = masked_mean(losses, mask)
-        assert result.item() == pytest.approx(2.0)
+        # 2 valid positions, each summing 2*2=4, total=8, denom=2 (positions)
+        assert result.item() == pytest.approx(4.0)
 
     def test_all_false(self):
         losses = torch.ones(1, 4, 2)
@@ -151,8 +153,23 @@ class TestMaskedMean:
         mask[0, :2] = False
         result = masked_mean(losses, mask, reduce_dims=(1, 2))
         assert result.shape == (2,)
-        assert result[0].item() == pytest.approx(1.0)
-        assert result[1].item() == pytest.approx(1.0)
+        # Batch 0: 2 valid positions, sum=6, denom=2 → 3.0
+        assert result[0].item() == pytest.approx(3.0)
+        # Batch 1: 4 valid positions, sum=12, denom=4 → 3.0
+        assert result[1].item() == pytest.approx(3.0)
+
+    def test_matches_kinetix_normalization(self):
+        """Verify normalization matches kinetix: sum(loss*mask)/sum(mask) where mask is (B,T,1)."""
+        B, T, D = 2, 6, 4
+        losses = torch.randn(B, T, D)
+        mask_2d = torch.tensor([[True, True, False, False, True, True],
+                                [False, True, True, True, True, False]])
+        result = masked_mean(losses, mask_2d)
+
+        # Manual kinetix-style computation
+        mask_3d = mask_2d.unsqueeze(-1).float()  # (B, T, 1)
+        expected = (losses * mask_3d).sum() / mask_3d.sum()
+        assert result.item() == pytest.approx(expected.item(), rel=1e-5)
 
 
 class TestApplyTTACInference:
@@ -270,4 +287,5 @@ class TestFlowMatchingIntegration:
         losses[:, :2] = 999.0  # Large values in prefix (should be masked)
 
         result = masked_mean(losses, postfix_mask)
-        assert result.item() == pytest.approx(1.0)
+        # 4 valid positions, each with D=4 ones, sum=16, denom=4 positions → 4.0
+        assert result.item() == pytest.approx(float(action_dim))
