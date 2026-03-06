@@ -76,6 +76,17 @@ def build_workflow_cmd(
     if base_model_repo_path:
         weight_path = f"{base_checkpoint}/{base_model_repo_path}"
 
+    ttac_args = ""
+    ttac = cfg.get("ttac")
+    if ttac and ttac.get("enabled", False):
+        ttac_args = (
+            f" --model.ttac-config.enabled True"
+            f" --model.ttac-config.min-delay {ttac['min_delay']}"
+            f" --model.ttac-config.max-delay {ttac['max_delay']}"
+            f" --model.ttac-config.delay-distribution {ttac.get('delay_distribution', 'UNIFORM')}"
+            f" --model.ttac-config.exp-decay {ttac.get('exp_decay', 1.0)}"
+        )
+
     train_cmd = (
         f"uv run torchrun --standalone --nnodes=1 --nproc_per_node={num_gpus} "
         f"scripts/train_pytorch.py {train_config_name} "
@@ -89,6 +100,7 @@ def build_workflow_cmd(
         f"--keep-period {keep_period} "
         f"--num-train-steps {num_train_steps} "
         f"--model.action-horizon {action_horizon}"
+        f"{ttac_args}"
     )
 
     tg_curl = (
@@ -282,6 +294,12 @@ def main():
     print(f"  Batch:     {cfg['batch_size']}")
     print(f"  Horizon:   {cfg['action_horizon']}")
     print(f"  Save every {cfg['save_interval']} steps, keep every {cfg['keep_period']} steps")
+    ttac = cfg.get("ttac")
+    if ttac and ttac.get("enabled", False):
+        print(f"  TTAC:      enabled, delay=[{ttac['min_delay']}, {ttac['max_delay']}], "
+              f"distribution={ttac.get('delay_distribution', 'UNIFORM')}")
+    else:
+        print(f"  TTAC:      disabled")
     print()
 
     pod = create_pod(api_key, payload)

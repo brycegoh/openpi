@@ -29,7 +29,7 @@ import openpi.training.misc.roboarena_config as roboarena_config
 import openpi.training.optimizer as _optimizer
 import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as _transforms
-from openpi.policies.ttac import TTACConfig, TTACDelayDistribution
+from openpi.policies.ttac import TTACConfig
 
 ModelType: TypeAlias = _model.ModelType
 # Work around a tyro issue with using nnx.filterlib.Filter directly.
@@ -1544,8 +1544,7 @@ _CONFIGS = [
             ttac_config=TTACConfig(
                 enabled=True,
                 min_delay=0,
-                max_delay=25,
-                delay_distribution=TTACDelayDistribution.UNIFORM,
+                max_delay=6,
             ),
         ),
         data=LeRobotTCRDataConfig(
