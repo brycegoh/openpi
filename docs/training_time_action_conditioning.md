@@ -108,20 +108,91 @@ model_cfg = pi0_config.Pi0Config(
 
 ### Delay Distribution
 
-- **UNIFORM**: Each delay in `[min_delay, max_delay]` is equally likely. Good
-  default for most use cases.
-- **EXP**: Smaller delays are exponentially more likely, weighted by
-  `exp(-exp_decay * delay)`. Matches the original kinetix implementation when
-  `min_delay=0` and `exp_decay=1.0`. Use this if you want more training signal
-  on the common case of small delays.
+The delay distribution controls how often each delay value `d` is sampled during
+training. This directly affects how much training signal the model receives for
+each prefix length.
+
+#### `UNIFORM`
+
+Every delay in `[min_delay, max_delay]` is sampled with equal probability.
+
+```
+delay:  0   1   2   3   4   5
+prob:  1/6 1/6 1/6 1/6 1/6 1/6    (for min_delay=0, max_delay=5)
+```
+
+**When to use:** Good general-purpose default. Gives equal training signal to
+all delay values, which is appropriate when you don't know your inference latency
+in advance or want the model to handle any delay equally well.
+
+#### `EXP`
+
+Smaller delays are exponentially more likely, with probability proportional to
+`exp(-exp_decay * d)`. Larger `exp_decay` values concentrate more probability
+mass on small delays.
+
+```
+delay:  0      1      2      3      4       (exp_decay=1.0)
+weight: 1.000  0.368  0.135  0.050  0.018
+prob:   63.6%  23.4%  8.6%   3.2%   1.2%
+```
+
+This is what the original paper uses. The authors explain:
+
+> *"We sample delays from {0, 1, 2, 3, 4} with exponentially decreasing
+> weights, as we found that higher delays need less training supervision.
+> Better results could likely be obtained by spending more training compute
+> training individual checkpoints for each delay."*
+
+The reasoning is that **delay=0 is the hardest case** for the model: it receives
+no prefix context at all and must generate the entire chunk from scratch (this is
+standard unconditional generation). As the delay increases, the model gets more
+ground-truth prefix context to condition on, making the prediction task easier.
+Therefore:
+
+- **delay=0** (no prefix): The model must learn full unconditional generation.
+  This is the baseline capability and needs the most training signal.
+- **delay=1-2** (short prefix): The model gets minimal context. Still
+  challenging, still needs significant training signal.
+- **delay=3-4+** (long prefix): The model gets substantial context. The
+  remaining postfix is short and strongly constrained by the prefix, so the
+  model learns this regime with relatively few examples.
+
+The exponential weighting reflects this diminishing marginal value: each
+additional prefix action makes the task easier, so the model needs proportionally
+less training time on that delay value.
+
+**When to use:** Recommended when you want to match the paper's approach. Also
+good when your expected inference delay is usually small (1-3 steps) but you
+want coverage up to a worst-case delay. The exponential distribution naturally
+allocates training budget in proportion to task difficulty.
+
+#### `exp_decay` parameter
+
+Controls the steepness of the exponential. Only used with `EXP` distribution.
+
+| `exp_decay` | Effect | delay=0 vs delay=4 ratio |
+|---|---|---|
+| 0.5 | Gentle decay, closer to uniform | 7.4x |
+| 1.0 | Paper default | 54.6x |
+| 2.0 | Aggressive, mostly delay=0 | 2981x |
+
+- `exp_decay=1.0` matches the original kinetix paper.
+- Lower values (0.3-0.7) give a softer version of EXP, more like a compromise
+  between UNIFORM and the paper's approach.
+- Higher values (1.5+) concentrate almost all training on delay=0.
 
 ### Guidelines
 
 - Set `max_delay` to your expected **worst-case inference delay** in timesteps
   (typically 4-8 for most setups).
-- `min_delay=0` means some batches train with no prefix at all (standard
-  training), which helps the model stay good at unconditional generation.
+- `min_delay=0` is important: it ensures the model still trains on the
+  unconditional case (no prefix), preserving its ability to generate the first
+  chunk where no previous actions exist.
 - `max_delay` must be strictly less than `action_horizon`.
+- Start with `UNIFORM` for simplicity. Switch to `EXP` with `exp_decay=1.0` if
+  you want to match the paper or if you observe that the model underperforms at
+  small delays.
 
 ---
 
