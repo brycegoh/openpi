@@ -29,6 +29,17 @@ Usage (RTC disabled, simple sequential chunking):
 
 Usage (with action interpolation to give inference more time, default 1.7x):
     python main.py --modal-app-name openpi-policy-server-rtc-1 --interpolation-factor 1.7
+
+ python examples/rtc_inference/main.py \
+  --modal-app-name openpi-policy-server-rtc-1 \
+  --hf-repo-id griffinlabs/pi05_B017_1877_ckpt_73_action_horizon \
+  --folder-path "pi05_tcr_full_finetune_pytorch/pi05_B017/4385" \
+  --config-name pi05_tcr_full_finetune_pytorch \
+  --prompt "Clean the countertop" \
+  --dataset-repo-id griffinlabs/B017_dataset \
+  --stats-json-path ./norm_stats.json \
+  --duration 60 \
+  --model-action-horizon 73
 """
 
 
@@ -206,6 +217,7 @@ class Args:
     prompt: str | None = None
     dataset_repo_id: str | None = None
     stats_json_path: str | None = None
+    model_action_horizon: int | None = None  # Override server-side config action_horizon
 
     # Use a mock policy instead of connecting to a server
     use_mock_policy: bool = False
@@ -452,6 +464,8 @@ def main(args: Args) -> None:
         server_obs_fields["dataset_repo_id"] = args.dataset_repo_id
     if args.stats_json_path:
         server_obs_fields["stats_json_path"] = args.stats_json_path
+    if args.model_action_horizon is not None:
+        server_obs_fields["model_action_horizon"] = args.model_action_horizon
 
     def get_observation() -> dict:
         obs = robot.get_observation()

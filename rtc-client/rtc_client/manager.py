@@ -137,6 +137,11 @@ class RTCInferenceManager:
     For RTC-enabled inference, the leftover raw actions from the previous chunk are
     sent to the server so it can use inpainting to produce temporally consistent actions.
 
+    All non-image observation fields returned by ``get_observation_fn`` are
+    forwarded verbatim to the server.  Callers can inject server-side overrides
+    (e.g. ``model_action_horizon``) directly into the observation dict without
+    needing a dedicated manager API.
+
     Args:
         policy: A policy client (e.g., WebsocketClientPolicy) that implements infer().
         get_observation_fn: Callable that returns the current observation dict.

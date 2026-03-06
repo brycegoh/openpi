@@ -32,6 +32,7 @@ Protocol:
         "prompt": "optional prompt text",
         "dataset_repo_id": "username/dataset-repo",
         "stats_json_path": "stats.json",
+        "model_action_horizon": 25,  # optional, overrides config action_horizon
         ... other observation data ...
     }
 6. Server loads model (if not already loaded) and returns action
@@ -294,6 +295,7 @@ def endpoint():
         prompt: str | None = None,
         dataset_repo_id: str | None = None,
         stats_json_path: str | None = None,
+        model_action_horizon: int | None = None,
     ):
         """Load a policy with caching.
 
@@ -309,6 +311,9 @@ def endpoint():
             prompt: Optional default prompt for the policy
             dataset_repo_id: Optional HuggingFace dataset repo for norm_stats
             stats_json_path: Path to stats.json within the dataset repo
+            model_action_horizon: Optional override for the model's action_horizon
+                config value. When set, the model will produce action chunks of
+                this length instead of the default from the training config.
         """
         # Cache key for the fully loaded policy (including compiled model)
         # Note: We include all parameters since they affect the policy behavior
@@ -319,6 +324,7 @@ def endpoint():
             prompt or "",
             dataset_repo_id or "",
             stats_json_path or "",
+            model_action_horizon or "",
         )
 
         logger.info(
@@ -369,6 +375,15 @@ def endpoint():
                 f"Using config '{train_config.name}' with pi05={train_config.model.pi05}"
             )
 
+            if model_action_horizon is not None:
+                logger.info(
+                    f"Overriding action_horizon: {train_config.model.action_horizon} -> {model_action_horizon}"
+                )
+                new_model_cfg = dataclasses.replace(
+                    train_config.model, action_horizon=model_action_horizon
+                )
+                train_config = dataclasses.replace(train_config, model=new_model_cfg)
+
             # Create policy with norm_stats
             logger.info("Creating trained policy...")
             policy = _policy_config.create_trained_policy(
@@ -399,6 +414,7 @@ def endpoint():
         5. Inference loop - client sends observations with model specification:
             - hf_repo_id, folder_path, config_name (required for model loading)
             - prompt, dataset_repo_id, stats_json_path (optional)
+            - model_action_horizon (optional int, overrides config's action_horizon)
             - Model is loaded/switched dynamically when these fields are present
             - Server responds with actions
 
@@ -462,6 +478,13 @@ def endpoint():
                     prompt = obs.pop("prompt", None)
                     dataset_repo_id = obs.pop("dataset_repo_id", None)
                     stats_json_path = obs.pop("stats_json_path", None)
+                    model_action_horizon = obs.pop("model_action_horizon", None)
+                    if model_action_horizon is not None:
+                        model_action_horizon = int(model_action_horizon)
+                        if model_action_horizon < 1:
+                            raise ValueError(
+                                f"model_action_horizon must be a positive integer, got {model_action_horizon}"
+                            )
 
                     # Create model key to check if we need to load/switch model
                     if hf_repo_id and folder_path and config_name:
@@ -472,6 +495,7 @@ def endpoint():
                             prompt or "",
                             dataset_repo_id or "",
                             stats_json_path or "",
+                            model_action_horizon or "",
                         )
 
                         # Load model if not loaded or if different model requested
@@ -487,6 +511,7 @@ def endpoint():
                                     prompt,
                                     dataset_repo_id,
                                     stats_json_path,
+                                    model_action_horizon,
                                 )
                                 current_model_key = new_model_key
                                 logger.info(
