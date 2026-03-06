@@ -80,7 +80,7 @@ def build_workflow_cmd(
     ttac = cfg.get("ttac")
     if ttac and ttac.get("enabled", False):
         ttac_args = (
-            f" --model.ttac-config.enabled True"
+            f" --model.ttac-config.enabled"
             f" --model.ttac-config.min-delay {ttac['min_delay']}"
             f" --model.ttac-config.max-delay {ttac['max_delay']}"
             f" --model.ttac-config.delay-distribution {ttac.get('delay_distribution', 'UNIFORM')}"
