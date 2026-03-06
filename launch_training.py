@@ -69,6 +69,7 @@ def build_workflow_cmd(
     keep_period = cfg["keep_period"]
     num_train_steps = cfg["num_train_steps"]
     action_horizon = cfg["action_horizon"]
+    train_config_name = cfg.get("train_config_name", "pi05_tcr_full_finetune_pytorch")
     wandb_flag = "--wandb-enabled" if cfg.get("wandb_enabled", True) else ""
 
     weight_path = base_checkpoint
@@ -77,7 +78,7 @@ def build_workflow_cmd(
 
     train_cmd = (
         f"uv run torchrun --standalone --nnodes=1 --nproc_per_node={num_gpus} "
-        f"scripts/train_pytorch.py pi05_tcr_full_finetune_pytorch "
+        f"scripts/train_pytorch.py {train_config_name} "
         f"--exp_name {exp_name} "
         f"--checkpoint-base-dir {checkpoint_base_dir} "
         f"--data.repo-id /workspace/dataset "
@@ -266,10 +267,12 @@ def main():
 
     payload = build_pod_payload(cfg, hf_token, wandb_api_key, telegram_token, telegram_chat_id)
 
+    train_config_name = cfg.get("train_config_name", "pi05_tcr_full_finetune_pytorch")
     print(f"Creating RunPod pod '{cfg['pod_name']}'...")
     print(f"  Template:  {cfg['template_id']}")
     print(f"  GPU:       {cfg['gpu_count']}x {cfg['gpu_type']}")
     print(f"  Cloud:     {cfg['cloud_type']}")
+    print(f"  Config:    {train_config_name}")
     print(f"  Dataset:   {cfg['dataset_repo']}")
     print(f"  Base model:{cfg['base_model_repo']}")
     if cfg.get("base_model_repo_path"):
