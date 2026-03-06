@@ -32,14 +32,14 @@ Usage (with action interpolation to give inference more time, default 1.7x):
 
  python examples/rtc_inference/main.py \
   --modal-app-name openpi-policy-server-rtc-1 \
-  --hf-repo-id griffinlabs/pi05_B017_1877_ckpt_73_action_horizon \
+  --hf-repo-id griffinlabs/pi05_B017_1877_ckpt \
   --folder-path "pi05_tcr_full_finetune_pytorch/pi05_B017/4385" \
   --config-name pi05_tcr_full_finetune_pytorch \
   --prompt "Clean the countertop" \
   --dataset-repo-id griffinlabs/B017_dataset \
   --stats-json-path ./norm_stats.json \
   --duration 60 \
-  --model-action-horizon 73
+  --model-action-horizon 50
 """
 
 
@@ -227,7 +227,7 @@ class Args:
     action_horizon: int = 50
     action_dim: int = 14
     control_hz: float = 30.0
-    interpolation_factor: float = 1.7  # Linear interpolation to lengthen actions (1.0 = disabled)
+    interpolation_factor: float = 2.0  # Linear interpolation to lengthen actions (1.0 = disabled)
 
     # RTC parameters
     rtc: bool = True
@@ -251,6 +251,7 @@ def compute_stats(
     events: list[TimingEvent],
     t0: float,
     action_interval: float,
+    interpolation_factor: float = 1.0,
 ) -> dict:
     """Derive idle time and overlap statistics from recorded timing events.
 
@@ -293,6 +294,20 @@ def compute_stats(
 
     total_inference_s = sum(end - start for start, end in inference_intervals)
 
+    inference_durations = [end - start for start, end in inference_intervals]
+    inference_actions = [d / action_interval / interpolation_factor for d in inference_durations]
+
+    if inference_durations:
+        min_inference_s = min(inference_durations)
+        max_inference_s = max(inference_durations)
+        avg_inference_s = total_inference_s / len(inference_durations)
+        min_inference_actions = min(inference_actions)
+        max_inference_actions = max(inference_actions)
+        avg_inference_actions = avg_inference_s / action_interval / interpolation_factor
+    else:
+        min_inference_s = max_inference_s = avg_inference_s = 0.0
+        min_inference_actions = max_inference_actions = avg_inference_actions = 0.0
+
     async_duration_s = max(
         (ev.timestamp - t0 for ev in events),
         default=0.0,
@@ -317,6 +332,12 @@ def compute_stats(
         "num_inferences": len(inference_intervals),
         "num_actions": len(action_times),
         "num_idles": len(idle_times),
+        "min_inference_s": min_inference_s,
+        "max_inference_s": max_inference_s,
+        "avg_inference_s": avg_inference_s,
+        "min_inference_actions": min_inference_actions,
+        "max_inference_actions": max_inference_actions,
+        "avg_inference_actions": avg_inference_actions,
     }
 
 
@@ -409,7 +430,11 @@ def plot_timeline(
         f"Idle: {stats['idle_time_s']:.2f}s  |  "
         f"Overlap: {stats['overlap_time_s']:.2f}s  |  "
         f"Avg inference: {stats['total_inference_s'] / max(stats['num_inferences'], 1) * 1000:.0f}ms  |  "
-        f"Time saved vs sync: {stats['time_saved_s']:.2f}s ({stats['time_saved_pct']:.1f}%)"
+        f"Time saved vs sync: {stats['time_saved_s']:.2f}s ({stats['time_saved_pct']:.1f}%)\n"
+        f"Inference latency in actions — "
+        f"Min: {stats['min_inference_actions']:.1f}  |  "
+        f"Avg: {stats['avg_inference_actions']:.1f}  |  "
+        f"Max: {stats['max_inference_actions']:.1f}"
     )
     fig.text(0.5, -0.02, stats_text, ha="center", fontsize=9, style="italic")
 
@@ -565,7 +590,7 @@ def main(args: Args) -> None:
     hit_rate = actions_executed / max(total_steps, 1) * 100
 
     # --- Timing statistics ---
-    stats = compute_stats(timing_log.events, t0, action_interval)
+    stats = compute_stats(timing_log.events, t0, action_interval, args.interpolation_factor)
 
     logger.info("=" * 60)
     logger.info("Run Summary")
@@ -580,7 +605,9 @@ def main(args: Args) -> None:
     logger.info("  Inferences (excl. cold start): %d", manager._inference_count)
     if manager._inference_count > 0:
         avg_infer_ms = (manager._total_inference_time / manager._inference_count) * 1000
-        logger.info("  Avg inference time: %.1fms", avg_infer_ms)
+        logger.info("  Avg inference time: %.1fms (%.1f actions)", avg_infer_ms, stats["avg_inference_actions"])
+        logger.info("  Min inference time: %.1fms (%.1f actions)", stats["min_inference_s"] * 1000, stats["min_inference_actions"])
+        logger.info("  Max inference time: %.1fms (%.1f actions)", stats["max_inference_s"] * 1000, stats["max_inference_actions"])
     logger.info("-" * 60)
     logger.info("Timing Analysis (async vs sync)")
     logger.info("-" * 60)
