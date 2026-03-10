@@ -296,6 +296,7 @@ def endpoint():
         dataset_repo_id: str | None = None,
         stats_json_path: str | None = None,
         model_action_horizon: int | None = None,
+        use_quantile_norm: bool | None = None,
     ):
         """Load a policy with caching.
 
@@ -314,6 +315,9 @@ def endpoint():
             model_action_horizon: Optional override for the model's action_horizon
                 config value. When set, the model will produce action chunks of
                 this length instead of the default from the training config.
+            use_quantile_norm: If provided, overrides the use_quantile_norm value
+                from the data config. If None, the default from
+                create_base_config is used (True for non-PI0 models).
         """
         # Cache key for the fully loaded policy (including compiled model)
         # Note: We include all parameters since they affect the policy behavior
@@ -325,6 +329,7 @@ def endpoint():
             dataset_repo_id or "",
             stats_json_path or "",
             model_action_horizon or "",
+            use_quantile_norm if use_quantile_norm is not None else "",
         )
 
         logger.info(
@@ -391,6 +396,7 @@ def endpoint():
                 str(checkpoint_dir),
                 default_prompt=prompt,
                 norm_stats=norm_stats,
+                use_quantile_norm=use_quantile_norm,
             )
 
             # Cache the loaded policy for future requests with the same parameters
@@ -485,6 +491,9 @@ def endpoint():
                             raise ValueError(
                                 f"model_action_horizon must be a positive integer, got {model_action_horizon}"
                             )
+                    use_quantile_norm = obs.pop("use_quantile_norm", None)
+                    if use_quantile_norm is not None:
+                        use_quantile_norm = bool(use_quantile_norm)
 
                     # Create model key to check if we need to load/switch model
                     if hf_repo_id and folder_path and config_name:
@@ -496,6 +505,7 @@ def endpoint():
                             dataset_repo_id or "",
                             stats_json_path or "",
                             model_action_horizon or "",
+                            use_quantile_norm if use_quantile_norm is not None else "",
                         )
 
                         # Load model if not loaded or if different model requested
@@ -512,6 +522,7 @@ def endpoint():
                                     dataset_repo_id,
                                     stats_json_path,
                                     model_action_horizon,
+                                    use_quantile_norm,
                                 )
                                 current_model_key = new_model_key
                                 logger.info(
