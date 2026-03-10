@@ -45,7 +45,7 @@ RUN uv venv --python 3.11.9 $UV_PROJECT_ENVIRONMENT
 
 # Clone openpi repository
 RUN git clone https://github.com/brycegoh/openpi.git .
-RUN git checkout 5bd075c9b48599706506954a5a6bcd5a3bc8664a
+RUN git checkout 82339e833d837709bba29bc76f4d76adcb37e510
 
 # Install openpi and its dependencies using the lockfile
 RUN GIT_LFS_SKIP_SMUDGE=1 uv sync

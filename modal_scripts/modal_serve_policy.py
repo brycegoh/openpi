@@ -96,7 +96,7 @@ image = (
     .env({"PATH": "/.venv/bin:$PATH"})
 )
 app = modal.App(
-    "openpi-policy-server-rtc-1",
+    "openpi-policy-server-rtc-2-quantile-norm-override",
     image=image,
 )
 
