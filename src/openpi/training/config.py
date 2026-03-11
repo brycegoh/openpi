@@ -612,6 +612,9 @@ class LeRobotTCRDataConfig(DataConfigFactory):
     action_sequence_keys: Sequence[str] = ("action",)
     # is_4_camera: bool = False
     is_4_camera: bool = False
+    # If true, convert joint dimensions to deltas w.r.t. current state before passing to the model.
+    # Gripper dimensions remain absolute.
+    use_delta_joint_actions: bool = False
 
     @override
     def create(
@@ -655,6 +658,12 @@ class LeRobotTCRDataConfig(DataConfigFactory):
             ],
             outputs=[TCROutputs(action_dim=self.env_action_dim)],
         )
+        if self.use_delta_joint_actions:
+            delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
 
         # Model transforms: shared across train/inference; handle resize, prompt tokenization, and padding.
         model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(
