@@ -389,7 +389,7 @@ class DataConfigFactory(abc.ABC):
             norm_stats=self._load_norm_stats(
                 epath.Path(self.assets.assets_dir or assets_dirs), asset_id
             ),
-            use_quantile_norm=False,
+            use_quantile_norm=model_config.model_type != ModelType.PI0,
         )
 
     def _load_norm_stats(
