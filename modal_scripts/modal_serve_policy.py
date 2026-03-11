@@ -297,6 +297,7 @@ def endpoint():
         stats_json_path: str | None = None,
         model_action_horizon: int | None = None,
         use_quantile_norm: bool | None = None,
+        use_delta_joint_actions: bool | None = None,
     ):
         """Load a policy with caching.
 
@@ -318,6 +319,10 @@ def endpoint():
             use_quantile_norm: If provided, overrides the use_quantile_norm value
                 from the data config. If None, the default from
                 create_base_config is used (True for non-PI0 models).
+            use_delta_joint_actions: If provided, overrides the
+                use_delta_joint_actions value on the data config factory
+                (e.g. LeRobotTCRDataConfig). If None, the factory default
+                is used (False for TCR configs).
         """
         # Cache key for the fully loaded policy (including compiled model)
         # Note: We include all parameters since they affect the policy behavior
@@ -330,6 +335,7 @@ def endpoint():
             stats_json_path or "",
             model_action_horizon or "",
             use_quantile_norm if use_quantile_norm is not None else "",
+            use_delta_joint_actions if use_delta_joint_actions is not None else "",
         )
 
         logger.info(
@@ -397,6 +403,7 @@ def endpoint():
                 default_prompt=prompt,
                 norm_stats=norm_stats,
                 use_quantile_norm=use_quantile_norm,
+                use_delta_joint_actions=use_delta_joint_actions,
             )
 
             # Cache the loaded policy for future requests with the same parameters
@@ -494,6 +501,9 @@ def endpoint():
                     use_quantile_norm = obs.pop("use_quantile_norm", None)
                     if use_quantile_norm is not None:
                         use_quantile_norm = bool(use_quantile_norm)
+                    use_delta_joint_actions = obs.pop("use_delta_joint_actions", None)
+                    if use_delta_joint_actions is not None:
+                        use_delta_joint_actions = bool(use_delta_joint_actions)
 
                     # Create model key to check if we need to load/switch model
                     if hf_repo_id and folder_path and config_name:
@@ -506,6 +516,7 @@ def endpoint():
                             stats_json_path or "",
                             model_action_horizon or "",
                             use_quantile_norm if use_quantile_norm is not None else "",
+                            use_delta_joint_actions if use_delta_joint_actions is not None else "",
                         )
 
                         # Load model if not loaded or if different model requested
@@ -523,6 +534,7 @@ def endpoint():
                                     stats_json_path,
                                     model_action_horizon,
                                     use_quantile_norm,
+                                    use_delta_joint_actions,
                                 )
                                 current_model_key = new_model_key
                                 logger.info(
