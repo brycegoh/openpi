@@ -122,6 +122,37 @@ def build_workflow_cmd(
     return inner_cmds
 
 
+def build_upload_workflow_cmd(cfg: dict, env_var_names: list[str]) -> str:
+    """Build a loop that periodically uploads checkpoints to Hugging Face."""
+    exp_name = cfg["exp_name"]
+    repo_id = f"griffinlabs/{exp_name}"
+    export_cmds = [f"export {name}=${name}" for name in env_var_names]
+
+    loop_cmds = export_cmds + [
+        'echo "Starting checkpoint uploader for repo '
+        f'{repo_id} (interval: 15m)"',
+        "while true; do",
+        '  echo "[$(date -u \'+%Y-%m-%dT%H:%M:%SZ\')] Checking uploader prerequisites"',
+        "  if ! command -v hf >/dev/null 2>&1; then",
+        '    echo "hf CLI not available yet; retrying in 15 minutes"',
+        "  elif [ ! -d /workspace/checkpoints ]; then",
+        '    echo "/workspace/checkpoints does not exist yet; retrying in 15 minutes"',
+        "  else",
+        '    echo "Uploading /workspace/checkpoints to '
+        f'{repo_id}"',
+        "    if cd /workspace/checkpoints && hf upload-large-folder "
+        f"{repo_id} . --repo-type model; then",
+        '      echo "Upload completed successfully"',
+        "    else",
+        '      echo "Upload failed; will retry in 15 minutes"',
+        "    fi",
+        "  fi",
+        "  sleep 900",
+        "done",
+    ]
+    return "\n".join(loop_cmds)
+
+
 def build_startup_cmd(
     cfg: dict, env_var_names: list[str], stop_after_training: bool = False,
 ) -> str:
@@ -129,18 +160,22 @@ def build_startup_cmd(
 
     The generated command writes a /post_start.sh script that installs tmux and
     runs the full workflow (clone, setup, training) inside a detached tmux
-    session named 'train'.  The template's /start.sh entrypoint is preserved,
-    providing SSH, Jupyter, nginx, and env export.
+    session named 'train'. A second detached tmux session named 'upload'
+    periodically syncs /workspace/checkpoints to Hugging Face. The template's
+    /start.sh entrypoint is preserved, providing SSH, Jupyter, nginx, and env
+    export.
 
-    SSH in and run ``tmux attach -t train`` to monitor progress.
+    SSH in and run ``tmux attach -t train`` or ``tmux attach -t upload`` to
+    monitor progress.
     """
     workflow = build_workflow_cmd(cfg, env_var_names, stop_after_training)
+    upload_workflow = build_upload_workflow_cmd(cfg, env_var_names)
 
     # /post_start.sh is called by /start.sh after nginx, SSH, Jupyter and
     # env-export are already set up.  We install tmux, write the workflow
-    # to a helper script (avoiding nested quoting issues), and launch it
-    # in a detached tmux session.  ``exit 0`` ensures /start.sh is never
-    # killed by set -e even if something above fails.
+    # scripts (avoiding nested quoting issues), and launch them in detached
+    # tmux sessions. ``exit 0`` ensures /start.sh is never killed by set -e
+    # even if something above fails.
     post_start_body = "\n".join([
         "#!/bin/bash",
         "apt-get update && apt-get install -y tmux",
@@ -149,7 +184,13 @@ def build_startup_cmd(
         workflow,
         "TRAIN_WORKFLOW_EOF",
         "chmod +x /tmp/train_workflow.sh",
+        "cat > /tmp/upload_checkpoints.sh << 'UPLOAD_WORKFLOW_EOF'",
+        "#!/bin/bash",
+        upload_workflow,
+        "UPLOAD_WORKFLOW_EOF",
+        "chmod +x /tmp/upload_checkpoints.sh",
         "tmux new-session -d -s train 'bash /tmp/train_workflow.sh; exec bash'",
+        "tmux new-session -d -s upload 'bash /tmp/upload_checkpoints.sh; exec bash'",
         "exit 0",
     ])
 
