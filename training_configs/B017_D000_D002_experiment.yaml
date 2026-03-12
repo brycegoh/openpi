@@ -5,7 +5,7 @@
 #   WANDB_API_KEY=...
 
 # --- RunPod Pod Settings ---
-pod_name: "B017_D000_D002_S002-S004_experiment"
+pod_name: "B017_D000_D002_experiment"
 template_id: "8u8g3zo2jg"
 gpu_type: "NVIDIA A100-SXM4-80GB"
 gpu_count: 4
@@ -19,14 +19,14 @@ git_repo: "https://github.com/brycegoh/openpi.git"
 git_branch: "v2.1"
 
 # --- Training Settings ---
-dataset_repo: "griffinlabs/B017_D000_D002_S002-S004"
+dataset_repo: "griffinlabs/B017_D000_D002"
 base_model_repo: "griffinlabs/pi05_1877ep_pytorch"
 base_model_repo_path: "pi05_tcr_full_finetune_pytorch/pi05_1877ep/57000"   # optional: subfolder within repo, e.g. "pi05_tcr_full_finetune_pytorch/pi05_1877ep/54000"
-exp_name: "B017_D000_D002_S002-S004_experiment"
+exp_name: "B017_D000_D002_experiment"
 batch_size: 384
 num_train_steps: 30000
-save_interval: 3048         # checkpoint every N steps
-keep_period: 3048            # keep checkpoints where step % keep_period == 0
+save_interval: 1754         # checkpoint every N steps
+keep_period: 1754            # keep checkpoints where step % keep_period == 0
 base_checkpoint: "/workspace/base_checkpoints"
 checkpoint_base_dir: "/workspace/checkpoints"
 action_horizon: 50
