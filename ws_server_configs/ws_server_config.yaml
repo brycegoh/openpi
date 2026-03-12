@@ -1,0 +1,28 @@
+# --- Secrets (loaded from .env file automatically) ---
+# Add these to .env in the project root:
+#   RUNPOD_API_KEY=...
+#   HF_TOKEN=...
+# Optional:
+#   TELEGRAM_BOT_TOKEN=...
+#   TELEGRAM_CHAT_ID=...
+
+# --- RunPod Pod Settings ---
+pod_name: "openpi_ws_server"
+template_id: "8u8g3zo2jg"          # RunPod template with CUDA + SSH
+gpu_type: "NVIDIA A10G"
+gpu_count: 1
+cloud_type: "SECURE"
+container_disk_gb: 50
+volume_gb: 100
+volume_mount_path: "/workspace"
+
+# --- Git Settings ---
+git_repo: "https://github.com/brycegoh/openpi.git"
+git_branch: "v2.1"
+
+# --- WebSocket Server Settings ---
+ws_port: 8000                       # port the WS server listens on
+
+# --- Setup script to run after git checkout ---
+# Installs uv, syncs deps, copies custom transformers, installs server packages.
+setup_script: "setup_ws_server.sh"
