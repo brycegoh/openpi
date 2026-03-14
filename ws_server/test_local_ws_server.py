@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 HOST = "0.0.0.0"
 PORT = 8888
-CHECK_HEALTHZ = True
+CHECK_HEALTHZ = False
 PRINT_FULL_ACTION = False
 RNG_SEED = 7
 
