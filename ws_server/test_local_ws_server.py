@@ -26,8 +26,8 @@ logger = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 # Config: edit these values and then run the script with no flags.
 # -----------------------------------------------------------------------------
-HOST = "127.0.0.1"
-PORT = 8000
+HOST = "0.0.0.0"
+PORT = 8888
 CHECK_HEALTHZ = True
 PRINT_FULL_ACTION = False
 RNG_SEED = 7

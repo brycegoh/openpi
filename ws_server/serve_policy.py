@@ -62,6 +62,8 @@ logger = logging.getLogger(__name__)
 _checkpoint_cache: dict[tuple[str, str], Path] = {}
 _policy_cache: dict[tuple[str, ...], object] = {}
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_DATASET_DIR = Path(os.environ.get("OPENPI_LOCAL_DATASET_DIR", PROJECT_ROOT / "dataset"))
 CHECKPOINT_BASE_DIR = os.environ.get("CHECKPOINT_BASE_DIR", "/inference-checkpoints")
 
 
@@ -135,8 +137,9 @@ def download_checkpoint(hf_repo_id: str, folder_path: str) -> Path:
 def download_norm_stats(dataset_repo_id: str, stats_json_path: str):
     """Download and load norm_stats from HuggingFace dataset.
 
-    Also saves to /workspace/dataset/norm_stats.json so that config's
-    _load_norm_stats can find it when repo_id="/workspace/dataset".
+    Also saves to the local project dataset directory so config's
+    _load_norm_stats can find it for configs that still reference the
+    dataset path directly.
     """
     logger.info(f"Downloading norm_stats.json from {dataset_repo_id}/{stats_json_path}...")
 
@@ -157,7 +160,7 @@ def download_norm_stats(dataset_repo_id: str, stats_json_path: str):
     norm_stats = _normalize.deserialize_json(norm_stats_file.read_text())
     logger.info(f"Successfully loaded norm stats with keys: {list(norm_stats.keys())}")
 
-    config_expected_dir = Path("/workspace/dataset")
+    config_expected_dir = PROJECT_DATASET_DIR
     config_expected_dir.mkdir(parents=True, exist_ok=True)
     config_expected_file = config_expected_dir / "norm_stats.json"
     shutil.copy(norm_stats_file, config_expected_file)
