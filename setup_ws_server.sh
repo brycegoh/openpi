@@ -12,12 +12,9 @@ if [ -z "${HF_TOKEN:-}" ]; then
 fi
 
 export HF_HUB_ENABLE_HF_TRANSFER="1"
-export HF_HOME="/workspace/hf-cache"
-export OPENPI_DATA_HOME="/workspace/openpi-cache"
 
-cd /workspace/openpi
+cd ~/openpi
 
-pip install uv
 GIT_LFS_SKIP_SMUDGE=1 uv sync
 GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
 
