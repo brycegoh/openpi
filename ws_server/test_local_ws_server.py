@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -17,6 +19,21 @@ from typing import Any
 
 import numpy as np
 import websockets.sync.client
+
+
+def _ensure_repo_imports() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    candidate_paths = (
+        repo_root / "src",
+        repo_root / "packages" / "openpi-client" / "src",
+    )
+    for candidate_path in candidate_paths:
+        candidate_str = str(candidate_path)
+        if candidate_path.exists() and candidate_str not in sys.path:
+            sys.path.insert(0, candidate_str)
+
+
+_ensure_repo_imports()
 
 from openpi_client import msgpack_numpy
 
