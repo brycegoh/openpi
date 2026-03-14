@@ -133,8 +133,8 @@ def run_inference_test() -> dict[str, Any]:
         ws_url,
         compression=None,
         max_size=None,
-        open_timeout=10,
-        close_timeout=10,
+        open_timeout=None,
+        close_timeout=None,
     ) as ws:
         connect_ms = (time.perf_counter() - connect_start) * 1000
 
