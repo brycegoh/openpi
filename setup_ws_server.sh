@@ -6,13 +6,6 @@ set -euo pipefail
 #
 # Usage: bash setup_ws_server.sh
 
-if [ -z "${HF_TOKEN:-}" ]; then
-  echo "Error: HF_TOKEN is not set in the environment."
-  exit 1
-fi
-
-export HF_HUB_ENABLE_HF_TRANSFER="1"
-
 cd ~/openpi
 
 GIT_LFS_SKIP_SMUDGE=1 uv sync
