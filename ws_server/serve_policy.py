@@ -44,12 +44,28 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import time
 import traceback
 from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+
+
+def _ensure_repo_imports() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    candidate_paths = (
+        repo_root / "src",
+        repo_root / "packages" / "openpi-client" / "src",
+    )
+    for candidate_path in candidate_paths:
+        candidate_str = str(candidate_path)
+        if candidate_path.exists() and candidate_str not in sys.path:
+            sys.path.insert(0, candidate_str)
+
+
+_ensure_repo_imports()
 
 import openpi_client.msgpack_numpy as msgpack_numpy
 from openpi.policies import policy_config as _policy_config
@@ -143,7 +159,7 @@ def download_norm_stats(dataset_repo_id: str, stats_json_path: str):
     """
     logger.info(f"Downloading norm_stats.json from {dataset_repo_id}/{stats_json_path}...")
 
-    stats_dest_dir = Path("/tmp/norm_stats")
+    stats_dest_dir = PROJECT_DATASET_DIR / "_downloads"
     stats_dest_dir.mkdir(parents=True, exist_ok=True)
 
     cmd = [
