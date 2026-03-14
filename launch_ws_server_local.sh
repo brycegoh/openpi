@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$SCRIPT_DIR"
 
 HOST="0.0.0.0"
-PORT="8000"
+PORT="8888"
 CHECKPOINT_DIR="${CHECKPOINT_BASE_DIR:-$REPO_ROOT/inference-checkpoints}"
 ENV_FILE="$REPO_ROOT/.env"
 INSTALL_DEPS=0
