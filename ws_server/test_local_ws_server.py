@@ -31,6 +31,7 @@ PORT = 8888
 CHECK_HEALTHZ = False
 PRINT_FULL_ACTION = False
 RNG_SEED = 7
+NUM_INFERENCE_STEPS = 30
 
 # GriffinLabs model defaults taken from `examples/rtc_inference/main.py`.
 HF_REPO_ID = "griffinlabs/pi05_B017_1877_ckpt"
@@ -89,8 +90,7 @@ def build_model_fields() -> dict[str, Any]:
     return fields
 
 
-def random_observation() -> dict[str, Any]:
-    rng = np.random.default_rng(RNG_SEED)
+def random_observation(rng: np.random.Generator) -> dict[str, Any]:
     return {
         "state": rng.standard_normal(STATE_DIM, dtype=np.float32),
         "images": {
@@ -120,13 +120,25 @@ def summarize_value(value: Any) -> Any:
     return value
 
 
+def summarize_timings(values_ms: list[float]) -> dict[str, float | int]:
+    data = np.asarray(values_ms, dtype=np.float64)
+    return {
+        "count": int(data.size),
+        "mean": float(data.mean()),
+        "min": float(data.min()),
+        "p50": float(np.quantile(data, 0.50)),
+        "p95": float(np.quantile(data, 0.95)),
+        "max": float(data.max()),
+    }
+
+
 def run_inference_test() -> dict[str, Any]:
     ws_url = build_ws_url(HOST, PORT)
     logger.info("Connecting to %s", ws_url)
 
     packer = msgpack_numpy.Packer()
     model_fields = build_model_fields()
-    observation = random_observation()
+    rng = np.random.default_rng(RNG_SEED)
 
     connect_start = time.perf_counter()
     with websockets.sync.client.connect(
@@ -153,22 +165,51 @@ def run_inference_test() -> dict[str, Any]:
 
         # This server loads the model in the inference loop, so repeat the model
         # fields inside the observation payload as the minimal working example.
-        observation.update(model_fields)
-        inference_start = time.perf_counter()
-        ws.send(packer.pack(observation))
-        action_raw = ws.recv()
-        inference_roundtrip_ms = (time.perf_counter() - inference_start) * 1000
-        if isinstance(action_raw, str):
-            raise RuntimeError(f"Server returned an inference error:\n{action_raw}")
-        action = msgpack_numpy.unpackb(action_raw)
+        client_roundtrip_ms: list[float] = []
+        server_infer_ms: list[float] = []
+        server_prev_total_ms: list[float] = []
+        last_action: dict[str, Any] | None = None
+
+        for step_idx in range(NUM_INFERENCE_STEPS):
+            observation = random_observation(rng)
+            observation.update(model_fields)
+            inference_start = time.perf_counter()
+            ws.send(packer.pack(observation))
+            action_raw = ws.recv()
+            elapsed_ms = (time.perf_counter() - inference_start) * 1000
+            if isinstance(action_raw, str):
+                raise RuntimeError(f"Server returned an inference error at step {step_idx}:\n{action_raw}")
+
+            action = msgpack_numpy.unpackb(action_raw)
+            last_action = action
+            client_roundtrip_ms.append(elapsed_ms)
+
+            timing = action.get("server_timing", {})
+            infer_ms = timing.get("infer_ms")
+            if infer_ms is not None:
+                server_infer_ms.append(float(infer_ms))
+            prev_total_ms = timing.get("prev_total_ms")
+            if prev_total_ms is not None:
+                server_prev_total_ms.append(float(prev_total_ms))
+
+            logger.info(
+                "Inference step %d/%d: client=%.1f ms server=%s",
+                step_idx + 1,
+                NUM_INFERENCE_STEPS,
+                elapsed_ms,
+                timing,
+            )
+
+    if last_action is None:
+        raise RuntimeError("No inference responses received from the server.")
 
     action_summary = {
-        "keys": sorted(action.keys()),
-        "server_timing": summarize_value(action.get("server_timing", {})),
+        "keys": sorted(last_action.keys()),
+        "server_timing": summarize_value(last_action.get("server_timing", {})),
     }
     for preferred_key in ("actions", "action", "terminate_episode"):
-        if preferred_key in action:
-            action_summary[preferred_key] = summarize_value(action[preferred_key])
+        if preferred_key in last_action:
+            action_summary[preferred_key] = summarize_value(last_action[preferred_key])
 
     result = {
         "server": {
@@ -179,14 +220,21 @@ def run_inference_test() -> dict[str, Any]:
         "timing_ms": {
             "ws_connect_ms": connect_ms,
             "init_roundtrip_ms": init_roundtrip_ms,
-            "inference_roundtrip_ms": inference_roundtrip_ms,
+            "client_roundtrip_summary": summarize_timings(client_roundtrip_ms),
+            "client_roundtrip_per_step": client_roundtrip_ms,
         },
         "policy_metadata": summarize_value(policy_metadata),
         "action_summary": action_summary,
     }
+    if server_infer_ms:
+        result["timing_ms"]["server_infer_summary"] = summarize_timings(server_infer_ms)
+        result["timing_ms"]["server_infer_per_step"] = server_infer_ms
+    if server_prev_total_ms:
+        result["timing_ms"]["server_prev_total_summary"] = summarize_timings(server_prev_total_ms)
+        result["timing_ms"]["server_prev_total_per_step"] = server_prev_total_ms
 
     if PRINT_FULL_ACTION:
-        result["full_action"] = summarize_value(action)
+        result["full_action"] = summarize_value(last_action)
 
     return result
 
